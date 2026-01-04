@@ -31,7 +31,7 @@ class ReactDotChatbot:
             embedding_function=self.embeddings
         )
 
-        self.llm = ChatGroq(model=model_name,temperature=0)
+        self.llm = ChatGroq(model=model_name,temperature=0,max_tokens=500)
         prompt = ChatPromptTemplate.from_template(
             """You are a React expert assistant. Use the following pieces of retrieved context 
         from the official React documentation to answer the user's question. 
