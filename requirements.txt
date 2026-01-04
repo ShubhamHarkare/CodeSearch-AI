@@ -7,3 +7,4 @@ chromadb
 langchain-ollama
 python-dotenv
 langchain_chroma
+redis
