@@ -10,10 +10,10 @@ class ReactChatbotTesterWithCache:
     def __init__(self):
         self.bot = ReactDotChatbot(use_cache=True)
         
-        # Clear cache for clean test
+        # Clear cache for clean test (removed reset_cache_stats - doesn't exist)
         print("🗑️ Clearing cache for fresh test...")
-        self.bot.clear_cache()
-        self.bot.reset_cache_stats()
+        result = self.bot.clear_cache()
+        print(f"   Cleared {result.get('deleted', 0)} cached queries")
         
         self.test_questions = [
             # Beginner Level (1-5)
@@ -117,7 +117,7 @@ class ReactChatbotTesterWithCache:
     def run_all_tests(self) -> None:
         """Run all test questions and generate report"""
         print("\n" + "="*80)
-        print("🚀 STARTING REACTDOTCHATBOT TEST SUITE WITH REDIS CACHE")
+        print("🚀 STARTING REACTDOTCHATBOT TEST SUITE WITH REDIS CACHE & LOGGING")
         print("="*80)
         
         for i, question in enumerate(self.test_questions):
@@ -150,7 +150,8 @@ class ReactChatbotTesterWithCache:
         print(f"\n💾 CACHE PERFORMANCE:")
         print(f"   Cache Hits: {len(cached_responses)}")
         print(f"   Cache Misses: {len(uncached_responses)}")
-        print(f"   Hit Rate: {(len(cached_responses)/len(successful_tests)*100):.1f}%")
+        if len(successful_tests) > 0:
+            print(f"   Hit Rate: {(len(cached_responses)/len(successful_tests)*100):.1f}%")
         
         if successful_tests:
             # Overall metrics
@@ -197,6 +198,29 @@ class ReactChatbotTesterWithCache:
         for key, value in cache_stats.items():
             print(f"   {key}: {value}")
         
+        # Logging System Stats
+        print(f"\n📝 LOGGING STATISTICS:")
+        log_stats = self.bot.get_logs_summary()
+        for key, value in log_stats.items():
+            print(f"   {key}: {value}")
+        
+        # Get popular queries
+        print(f"\n🔥 MOST POPULAR QUERIES:")
+        popular = self.bot.get_popular_queries(top_n=5)
+        for i, item in enumerate(popular, 1):
+            print(f"   {i}. {item['query'][:50]}... (asked {item['count']} times)")
+        
+        # Get slow queries
+        slow_queries = self.bot.get_slow_queries(threshold_seconds=5.0, top_n=3)
+        if slow_queries:
+            print(f"\n🐌 SLOWEST QUERIES (>5s):")
+            for i, item in enumerate(slow_queries, 1):
+                print(f"   {i}. {item['query'][:50]}... ({item['response_time']}s)")
+        
+        # Export comprehensive metrics
+        print(f"\n📊 Exporting comprehensive metrics...")
+        self.bot.export_metrics("test_metrics_summary.json")
+        
         # Failed Tests
         if failed_tests:
             print(f"\n❌ FAILED TESTS:")
@@ -208,12 +232,16 @@ class ReactChatbotTesterWithCache:
         self.save_results_to_file()
         
         print("\n" + "="*80)
-        print("✅ Testing Complete! Results saved to 'test_results_cached.json'")
+        print("✅ Testing Complete!")
+        print("📄 Results saved to: 'test_results_cached.json'")
+        print("📊 Metrics saved to: 'test_metrics_summary.json'")
+        print("📝 Logs available in: 'logs/' directory")
         print("="*80)
     
     def save_results_to_file(self) -> None:
         """Save test results to JSON file"""
         cache_stats = self.bot.get_cache_stats()
+        log_stats = self.bot.get_logs_summary()
         
         output = {
             "test_date": datetime.now().isoformat(),
@@ -221,6 +249,7 @@ class ReactChatbotTesterWithCache:
             "successful": len([r for r in self.results if r['success']]),
             "failed": len([r for r in self.results if not r['success']]),
             "cache_stats": cache_stats,
+            "logging_stats": log_stats,
             "results": self.results
         }
         
@@ -235,11 +264,21 @@ def main():
     print("   • 20 unique React questions")
     print("   • 5 duplicate questions to test caching")
     print("   • Redis cache performance tracking")
+    print("   • Comprehensive logging & metrics")
     print("   • Response time analysis (cached vs uncached)")
+    print("   • Popular queries tracking")
+    print("   • Slow query identification")
     
     input("\nPress Enter to start testing...")
     
     tester.run_all_tests()
+    
+    # Optional: Print dashboard at the end
+    print("\n" + "="*80)
+    print("📊 FINAL DASHBOARD")
+    print("="*80)
+    tester.bot.print_dashboard()
 
 if __name__ == "__main__":
     main()
+    
