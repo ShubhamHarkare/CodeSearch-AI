@@ -9,7 +9,7 @@ Date: January 2025
 from langchain_groq import ChatGroq
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain_chroma import Chroma
+# from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
