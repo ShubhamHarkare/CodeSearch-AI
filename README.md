@@ -159,29 +159,6 @@ python test_queries_with_cache.py
 
 ---
 
-## 📈 Roadmap
-
-### Completed ✅
-- [x] Core RAG pipeline
-- [x] React documentation scraping & chunking
-- [x] Vector database setup
-- [x] LLM integration (Groq)
-- [x] Redis caching layer
-- [x] Comprehensive testing
-
-### In Progress 🚧
-- [ ] RAGAS evaluation metrics
-- [ ] Streamlit web interface
-- [ ] Production deployment
-
-### Future Enhancements 🔮
-- [ ] Multi-documentation support (Vue.js, Angular)
-- [ ] Conversation memory for follow-up questions
-- [ ] User feedback mechanism
-- [ ] Multilingual support
-
----
-
 ## 🎓 Technical Deep-Dive
 
 ### RAG Pipeline
@@ -247,47 +224,17 @@ docker-compose up -d
 python chatbot.py
 ```
 
-### Production (Coming Soon)
-- Frontend: Streamlit Cloud
-- Backend: Railway.app
-- Cache: Redis Cloud (free tier)
-- Monitoring: Built-in metrics dashboard
-
----
-
-## 🤝 Contributing
-
-Contributions welcome! Areas for improvement:
-- Additional documentation sources
-- Better chunking strategies
-- Multi-turn conversation support
-- UI/UX enhancements
-
----
-
-## 📝 License
-
-MIT License - see [LICENSE](LICENSE) for details
-
 ---
 
 ## 👤 Author
 
-**Your Name**
+**Shubham Harkare**
 - LinkedIn: [shubham-harkare](https://www.linkedin.com/in/shubham-harkare/)
 - GitHub: [@ShubhamHarkare](https://github.com/ShubhamHarkare)
 - Portfolio: [website](https://shubham-harkare-owlgiwf.gamma.site)
 
 ---
 
-## 🙏 Acknowledgments
-
-- React team for excellent documentation
-- Anthropic for Claude (used for development assistance)
-- LangChain community
-- Groq for fast inference API
-
----
 
 ## 📚 Resources
 
