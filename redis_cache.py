@@ -3,7 +3,9 @@ import json
 import hashlib
 from datetime import timedelta
 from typing import Dict,Any,Optional
-
+from dotenv import load_dotenv
+import os
+load_dotenv()
 
 class RedisCache:
     '''
@@ -17,8 +19,8 @@ class RedisCache:
 
     def __init__(
             self,
-            host:str = 'localhost',
-            port:int = 6379,
+            host:str = None,
+            port:int = None,
             db:int = 0,
             ttl_hours: int = 24,
             key_prefix: str = 'codesearch'
@@ -34,16 +36,31 @@ class RedisCache:
             #? key_prefix: Prefix for all cache_keys
         '''
         try:
-            self.pool = redis.ConnectionPool(
-                host = host,
-                port = port,
-                db = db,
-                decode_responses = True,
-                max_connections = 10
-            )
+            redisUrl = os.getenv('REDIS_URL')
+            if redisUrl:
+                print(f'🔗 Connecting to Redis via URL...')
+                self.pool = redis.ConnectionPool.from_url(
+                    redisUrl,
+                    decode_responses=True,
+                    max_connections=10
+                )
+            else:
+                host = host or os.getenv('REDIS_HOST','localhost')
+                port = port or int(os.getenv('REDIS_PORT',6379))
+
+                print(f'🔗 Connecting to Redis at {host}:{port}...')
+                
+                self.pool = redis.ConnectionPool(
+                    host=host,
+                    port=port,
+                    db=db,
+                    decode_responses=True,
+                    max_connections=10
+                )
 
             self.redis_client = redis.Redis(connection_pool=self.pool)
-            print(f'Connected to Redis at {host}:{port}')
+            self.redis_client.ping()
+            print(f'✅ Connected to Redis successfully')
 
         except redis.ConnectionError as e:
             print(f'Failed to connect to Redis: {e}')

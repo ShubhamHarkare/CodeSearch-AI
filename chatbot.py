@@ -123,11 +123,7 @@ Answer:"""
         if use_cache:
             try:
                 print("    Connecting to Redis cache...")
-                self.cache = RedisCache(
-                    host=redis_host,
-                    port=redis_port,
-                    ttl_hours=24
-                )
+                self.cache = RedisCache(ttl_hours=24)
                 health = self.cache.health_check()
                 if health['connected']:
                     print(f"    Redis connected (latency: {health['latency_ms']}ms)")
