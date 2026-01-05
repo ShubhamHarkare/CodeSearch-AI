@@ -1,0 +1,11 @@
+langchain
+langchain-community
+langchain-groq
+langchain-text-splitters
+unstructured[md]
+chromadb
+langchain-ollama
+python-dotenv
+langchain_chroma
+redis
+streamlit

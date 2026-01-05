@@ -1,0 +1,1076 @@
+
+🔍 This test will ask 20 diverse React questions covering:
+   • Beginner concepts (components, JSX, props)
+   • React Hooks (useState, useEffect, useMemo)
+   • Forms & Events
+   • Performance optimization
+   • Advanced topics (Context, Portals, Error Boundaries)
+
+Press Enter to start testing...
+================================================================================
+🚀 STARTING REACTDOTCHATBOT TEST SUITE
+================================================================================
+
+================================================================================
+Question 1/20: How do I create a simple React component?
+================================================================================
+
+📝 ANSWER:
+To create a simple React component, you need to define a JavaScript function that returns JSX markup. Here's a basic example:
+
+```js
+export default function Profile() {
+  return (
+    <img
+      src="https://i.imgur.com/MK3eW3Am.jpg"
+      alt="Katherine Johnson"
+    />
+  );
+}
+```
+
+In this example, `Profile` is a React component that returns an `img` element with a source and alt text. 
+
+Here are the key points to note:
+
+1. The function name always begins with a capital letter.
+2. The function returns JSX markup.
+3. You can add interactivity to your component by using React's built-in Hooks, such as `useState` or `useEffect`.
+
+Remember, React components are reusable UI elements for your app, and they can be used to build complex user interfaces by combining multiple components.
+
+📚 SOURCES (4 found):
+  1. ## What are Effects and how are they different from events?  
+Before getting to Effects, you need to...
+  2. ## Defining a component  
+Traditionally when creating web pages, web developers marked up their cont...
+  3. [React-based frameworks](/learn/creating-a-react-app) take this a step further. Instead of using an ...
+
+⏱️  Response Time: 1.27s
+
+================================================================================
+Question 2/20: What is JSX and why do we use it?
+================================================================================
+
+📝 ANSWER:
+JSX is a syntax extension for JavaScript. It's often used in conjunction with React, but they are two separate things. JSX allows you to write HTML-like code in your JavaScript files, making it easier to create React components.
+
+We use JSX because it provides a more readable and concise way to write React components. Instead of writing JavaScript code to create a component, we can write HTML-like code that is easier to understand and maintain. This makes it easier to build and manage complex user interfaces.
+
+For example, instead of writing:
+
+```javascript
+import React from 'react';
+
+function MyComponent() {
+  return React.createElement('div', null, 'Hello, World!');
+}
+```
+
+We can write:
+
+```javascript
+import React from 'react';
+
+function MyComponent() {
+  return <div>Hello, World!</div>;
+}
+```
+
+This makes it easier to create and manage React components, and is one of the reasons why JSX is widely used in React development.
+
+📚 SOURCES (4 found):
+  1. <Note>  
+JSX and React are two separate things. They're often used together, but you *can* [use them...
+  2. Using `createFactory` was common before broad support for JSX, but it's rarely used today and can be...
+  3. function App() {
+// This is a usage of a component
+return <MyComponent />;
+}
+```  
+Often, the imprec...
+
+⏱️  Response Time: 0.70s
+
+================================================================================
+Question 3/20: How do I handle button clicks in React?
+================================================================================
+
+📝 ANSWER:
+To handle button clicks in React, you need to declare an event handler function inside your component and pass it down to the button JSX element using the `onClick` prop. 
+
+Here's an example:
+
+```js
+function MyButton() {
+  function handleClick() {
+    alert('You clicked me!');
+  }
+
+  return (
+    <button onClick={handleClick}>
+      Click me
+    </button>
+  );
+}
+```
+
+Notice that `onClick={handleClick}` has no parentheses at the end. This is because you're not calling the event handler function, but rather passing it down to React. React will call your event handler when the user clicks the button.
+
+You can also create a reusable Button component that accepts an `onClick` prop:
+
+```js
+function Button({ onClick, children }) {
+  return (
+    <button onClick={onClick}>
+      {children}
+    </button>
+  );
+}
+```
+
+This way, you can easily reuse the Button component in different parts of your application and handle button clicks in a centralized way.
+
+📚 SOURCES (4 found):
+  1. <Note>  
+Make sure that you use the appropriate HTML tags for your event handlers. For example, to h...
+  2. ### Making an interactive component  
+Let's fill the `Square` component with an `X` when you click i...
+  3. ## Responding to events  
+You can respond to events by declaring *event handler* functions inside yo...
+
+⏱️  Response Time: 0.53s
+
+================================================================================
+Question 4/20: What's the difference between props and state?
+================================================================================
+
+📝 ANSWER:
+According to the provided context, the difference between props and state is as follows:
+
+* Props are like arguments you pass to a function, allowing a parent component to pass data to a child component and customize its appearance.
+* State is like a component's memory, letting a component keep track of some information and change it in response to interactions.
+
+In other words, props are used to pass data from a parent component to a child component, while state is used to store and manage a component's internal data that can change over time.
+
+📚 SOURCES (4 found):
+  1. Props and state are different, but they work together. A parent component will often keep some infor...
+  2. static getDerivedStateFromProps(props, state) {
+// Any time the current user changes,
+// Reset any p...
+  3. 3. The value of the checkbox seems to be state since it changes over time and can't be computed from...
+
+⏱️  Response Time: 0.38s
+
+================================================================================
+Question 5/20: How do I render a list of items in React?
+================================================================================
+
+📝 ANSWER:
+You can render a list of items in React by using JavaScript features like the `for` loop or the array `map()` function. Here's an example of how to use the `map()` function to render a list of items:
+
+```js
+const products = [
+  { title: 'Cabbage', id: 1 },
+  { title: 'Garlic', id: 2 },
+  { title: 'Apple', id: 3 },
+];
+
+const listItems = products.map(product =>
+  <li key={product.id}>
+    {product.title}
+  </li>
+);
+```
+
+In this example, the `map()` function is used to transform an array of products into an array of `<li>` items. The `key` prop is used to assign a unique key to each item in the list.
+
+Alternatively, you can use a `for` loop to render a list of items:
+
+```js
+const products = [
+  { title: 'Cabbage', id: 1 },
+  { title: 'Garlic', id: 2 },
+  { title: 'Apple', id: 3 },
+];
+
+const listItems = [];
+for (let i = 0; i < products.length; i++) {
+  listItems.push(
+    <li key={products[i].id}>
+      {products[i].title}
+    </li>
+  );
+}
+```
+
+However, using the `map()` function is generally more concise and easier to read.
+
+It's also worth noting that when rendering a list of items, you should use a unique key for each item. This is because React uses the key to keep track of the items in the list and to determine when an item has been added, removed, or updated. If you don't provide a key, React will throw an error.
+
+You can also use a render prop to render a list of items. Here's an example:
+
+```js
+export default function List({ items, renderItem }) {
+  return (
+    <div className="List">
+      {items.map((item, index) => {
+        return renderItem(item, index === 0);
+      })}
+    </div>
+  );
+}
+
+<List
+  items={products}
+  renderItem={(product, isHighlighted) =>
+    <li key={product.id} style={{ backgroundColor: isHighlighted ? 'red' : 'white' }}>
+      {product.title}
+    </li>
+  }
+/>
+```
+
+In this example, the `List` component
+
+📚 SOURCES (4 found):
+  1. ### Animating Lists  
+You can also use `<ViewTransition>` to animate lists of items as they re-order...
+  2. ## Alternatives  
+### Passing data with a render prop  
+Instead of using `cloneElement`, consider ac...
+  3. ## Usage  
+<Pitfall>  
+**Do not call `useId` to generate keys in a list.** [Keys should be generated...
+
+⏱️  Response Time: 0.83s
+
+================================================================================
+Question 6/20: How do I use the useState hook?
+================================================================================
+
+📝 ANSWER:
+You can use the `useState` hook by calling it at the top level of your React function, before any early returns. The basic syntax is as follows:
+
+```javascript
+function MyComponent() {
+  const [state, setState] = useState(initialState);
+  // ...
+}
+```
+
+In this example, `initialState` is the initial value of the state. The `useState` hook returns an array with two elements: the current state value and a function to update the state.
+
+Here's a more detailed example:
+
+```javascript
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  function handleClick() {
+    setCount(count + 1);
+  }
+
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button onClick={handleClick}>Increment</button>
+    </div>
+  );
+}
+```
+
+In this example, the `useState` hook is used to create a state variable `count` with an initial value of 0. The `setCount` function is used to update the state when the button is clicked.
+
+Remember to follow the Rules of Hooks and only call `useState` at the top level of your React function, before any early returns.
+
+📚 SOURCES (4 found):
+  1. ### New hook: `useActionState`  
+To make the common cases easier for Actions, we've added a new hook...
+  2. ## Rules of Hooks  
+Hooks are defined using JavaScript functions, but they represent a special type ...
+  3. function Bad() {
+try {
+// 🔴 Bad: inside try/catch/finally block (to fix, move it outside!)
+const [x,...
+
+⏱️  Response Time: 0.60s
+
+================================================================================
+Question 7/20: What's the difference between useState and useReducer?
+================================================================================
+
+📝 ANSWER:
+Based on the provided context, I'll answer the question about the difference between `useState` and `useReducer`.
+
+`useState` and `useReducer` are both used for state management in React, but they serve slightly different purposes and have different use cases.
+
+`useState` is a simple state management hook that allows you to add a state variable and an update function to it. It's suitable for most use cases where you need to manage a simple state.
+
+`useReducer`, on the other hand, is a more powerful state management hook that allows you to manage complex state by using a reducer function. It's similar to the `Redux` store, but it's designed to be used in a functional component.
+
+Here's a key difference between the two:
+
+- `useState` uses a function to update the state, whereas `useReducer` uses a reducer function to update the state.
+
+In general, if you need to manage a simple state, `useState` is a good choice. However, if you need to manage a complex state or if you're already familiar with the `Redux` architecture, `useReducer` might be a better fit.
+
+Here's an example of how you might use `useState` and `useReducer`:
+
+```jsx
+// Using useState
+import { useState } from 'react';
+
+function Counter() {
+  const [count, setCount] = useState(0);
+
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button onClick={() => setCount(count + 1)}>Increment</button>
+    </div>
+  );
+}
+
+// Using useReducer
+import { useReducer } from 'react';
+
+function counterReducer(state, action) {
+  switch (action.type) {
+    case 'INCREMENT':
+      return { count: state.count + 1 };
+    default:
+      return state;
+  }
+}
+
+function Counter() {
+  const [state, dispatch] = useReducer(counterReducer, { count: 0 });
+
+  return (
+    <div>
+      <p>Count: {state.count}</p>
+      <button onClick={() => dispatch({ type: 'INCREMENT' })}>
+        Increment
+      </button>
+    </div>
+  );
+}
+```
+
+📚 SOURCES (4 found):
+  1. <Note>  
+JSX and React are two separate things. They're often used together, but you *can* [use them...
+  2. // Urgent: Show what was typed
+setInputValue(input);
+  3. Using `createFactory` was common before broad support for JSX, but it's rarely used today and can be...
+
+⏱️  Response Time: 0.76s
+
+================================================================================
+Question 8/20: How do I fetch data when a component mounts using useEffect?
+================================================================================
+
+📝 ANSWER:
+You can fetch data when a component mounts using `useEffect` by providing an empty dependency array (`[]`) as the second argument. This tells React to run the effect only once, when the component mounts.
+
+Here's an example:
+
+```javascript
+import { useState, useEffect } from 'react';
+import { fetchBio } from './api.js';
+
+export default function Page() {
+  const [person, setPerson] = useState('Alice');
+  const [bio, setBio] = useState(null);
+
+  useEffect(() => {
+    fetchBio(person).then(result => {
+      setBio(result);
+    });
+  }, []); // Run the effect only once, when the component mounts
+
+  // Rest of your component code...
+}
+```
+
+However, keep in mind that fetching data directly in an effect usually means you don't preload or cache data, and it's not very ergonomic. As the documentation suggests, it's recommended to use a framework's built-in data fetching mechanism if possible.
+
+📚 SOURCES (4 found):
+  1. <Note>  
+**Only Suspense-enabled data sources will activate the Suspense component.** They include: ...
+  2. <Note>  
+**Only Suspense-enabled data sources will activate the Suspense component.** They include: ...
+  3. ### Fetching data with Effects  
+You can use an Effect to fetch data for your component. Note that [...
+
+⏱️  Response Time: 0.61s
+
+================================================================================
+Question 9/20: How do I optimize performance with useMemo?
+================================================================================
+
+📝 ANSWER:
+Based on the provided context, it seems that React Compiler is a tool that automatically optimizes React applications at build time, freeing developers from manual memoization. However, the question is about optimizing performance with `useMemo`.
+
+Unfortunately, the provided context does not directly address how to optimize performance with `useMemo`. The context mentions that React Compiler automatically optimizes React applications, but it does not provide specific guidance on how to use `useMemo` effectively.
+
+To answer the question accurately, I would recommend consulting the official React documentation on `useMemo`, which can be found at [https://reactjs.org/docs/hooks-reference.html#usememo](https://reactjs.org/docs/hooks-reference.html#usememo).
+
+In general, `useMemo` is used to memoize values so that they are not recalculated unnecessarily. To optimize performance with `useMemo`, you can follow these best practices:
+
+1. Only memoize values that are expensive to calculate.
+2. Use a dependency array to specify when the memoized value should be recalculated.
+3. Avoid using `useMemo` to memoize values that are not used in the component.
+
+Here is an example of how to use `useMemo` effectively:
+```jsx
+import { useMemo } from 'react';
+
+function ExpensiveComponent() {
+  const expensiveValue = useMemo(() => {
+    // Calculate an expensive value
+    return someExpensiveCalculation();
+  }, []); // Only recalculate when the component mounts
+
+  return (
+    <div>
+      {expensiveValue}
+    </div>
+  );
+}
+```
+I hope this helps! Let me know if you have any further questions.
+
+📚 SOURCES (4 found):
+  1. ## What does React Compiler do?  
+React Compiler automatically optimizes your React application at b...
+  2. ## React Compiler  
+React Compiler is a tool that automatically optimizes your React app. [Learn mor...
+  3. ---
+title: Introduction
+---  
+<Intro>
+React Compiler is a new build-time tool that automatically opt...
+
+⏱️  Response Time: 3.91s
+
+================================================================================
+Question 10/20: What is useCallback and when should I use it?
+================================================================================
+
+📝 ANSWER:
+Based on the provided context, I don't have a direct answer to your question about `useCallback`. However, I can suggest that you might want to check the official React documentation for more information on `useCallback`.
+
+That being said, I can provide some general guidance on when to use `useCallback`. 
+
+`useCallback` is a hook that memoizes a function so that it's not recreated on every render. This can be useful when you need to pass a function as a prop to a child component, and you want to avoid the function being recreated unnecessarily.
+
+Here are some scenarios where you might want to use `useCallback`:
+
+1. When passing a function as a prop to a child component, and you want to avoid the function being recreated on every render.
+2. When you need to use a function in a `useCallback` or `useMemo` dependency array, and you want to avoid the function being recreated unnecessarily.
+3. When you want to optimize the performance of your application by avoiding unnecessary function creations.
+
+However, I would recommend checking the official React documentation for more information on `useCallback` and its usage.
+
+Here's an example of how you might use `useCallback`:
+```jsx
+import { useCallback } from 'react';
+
+function MyComponent() {
+  const handleClick = useCallback(() => {
+    console.log('Button clicked!');
+  }, []);
+
+  return (
+    <button onClick={handleClick}>
+      Click me!
+    </button>
+  );
+}
+```
+In this example, the `handleClick` function is memoized using `useCallback`, so it's not recreated on every render. The dependency array is empty, which means the function will only be recreated if the component is re-rendered due to a change in props or state.
+
+📚 SOURCES (4 found):
+  1. <Note>  
+JSX and React are two separate things. They're often used together, but you *can* [use them...
+  2. <Note>  
+#### When to use `useEffectEvent`  
+You should use `useEffectEvent` for functions that are ...
+  3. There are two rarely used variations of `useEffect` with differences in timing:  
+* [`useLayoutEffec...
+
+⏱️  Response Time: 4.77s
+
+================================================================================
+Question 11/20: How do I handle form validation in React?
+================================================================================
+
+📝 ANSWER:
+Unfortunately, the provided context does not directly address form validation in React. However, I can provide some general guidance on how to handle form validation in React.
+
+In React, form validation can be handled in several ways:
+
+1. **Client-side validation**: You can use JavaScript to validate the form data on the client-side. This can be done using libraries like React Hook Form or Formik, which provide built-in validation features.
+2. **Server-side validation**: You can also validate the form data on the server-side by sending the form data to the server and checking it there. This is typically done using a Server Function, as described in the provided context.
+
+To handle form validation using Server Functions, you can use the `useActionState` hook to access the pending state, last response, or to support progressive enhancement. You can also use the `useOptimistic` hook to manage optimistic updates.
+
+Here's an example of how you can use Server Functions to handle form validation:
+```jsx
+import { useActionState } from 'react';
+
+function ChangeName({ name, setName }) {
+  const { pending, lastResponse } = useActionState();
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+    const username = formData.get('username');
+
+    if (!username) {
+      // Handle invalid username
+      return;
+    }
+
+    // Call the Server Function to validate the username
+    const response = await requestUsername(formData);
+
+    if (response.error) {
+      // Handle validation error
+      return;
+    }
+
+    // Update the name state
+    setName(username);
+  }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input type="text" name="username" />
+      <button type="submit">Submit</button>
+    </form>
+  );
+}
+```
+In this example, we're using the `useActionState` hook to access the pending state and last response. We're also using the `requestUsername` Server Function to validate the username on the server-side.
+
+Note that this is just a basic example, and you'll need to adapt it to your specific use case.
+
+If you're looking for more information on form validation in React, I recommend checking out the official React documentation or searching for tutorials and examples online.
+
+📚 SOURCES (4 found):
+  1. ### Server Functions with Form Actions  
+Server Functions work with the new Form features in React 1...
+  2. ### Handle form submission with a Server Function  
+Render a `<form>` with an input and submit butto...
+  3. - **Error handling**: Actions provide error handling so you can display Error Boundaries when a requ...
+
+⏱️  Response Time: 8.94s
+
+================================================================================
+Question 12/20: How do I create controlled components for forms?
+================================================================================
+
+📝 ANSWER:
+To create controlled components for forms in React, you can use the `useState` hook to store the form data in the component's state. Then, you can use the `onChange` event handler to update the state whenever the user interacts with the form.
+
+Here's an example:
+
+```jsx
+import React, { useState } from 'react';
+
+function MyForm() {
+  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    // You can now access the form data in the state
+    console.log(username, email);
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <label>
+        Username:
+        <input
+          type="text"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+        />
+      </label>
+      <label>
+        Email:
+        <input
+          type="email"
+          value={email}
+          onChange={(event) => setEmail(event.target.value)}
+        />
+      </label>
+      <button type="submit">Submit</button>
+    </form>
+  );
+}
+```
+
+In this example, the `username` and `email` state variables are updated whenever the user types something in the corresponding input fields. The `handleSubmit` function is called when the form is submitted, and it logs the current values of the `username` and `email` state variables to the console.
+
+This is a basic example of how to create controlled components for forms in React. You can customize it to fit your specific needs and add more features as required.
+
+Note that this approach is different from the example you provided, which uses the `useFormStatus` and `useActionState` hooks to manage the form state. The approach I described is a more traditional way of handling forms in React, and it's often used when you need more control over the form data and validation.
+
+📚 SOURCES (4 found):
+  1. ## Form Hooks  
+*Forms* let you create interactive controls for submitting information.  To manage f...
+  2. ## Usage  
+### Server Functions in forms  
+The most common use case of Server Functions will be call...
+  3. - **Actions**: As shared above, we've added Actions to manage sending data from the client to the se...
+
+⏱️  Response Time: 7.96s
+
+================================================================================
+Question 13/20: How do I prevent default form submission?
+================================================================================
+
+📝 ANSWER:
+To prevent default form submission, you can use the `onSubmit` event handler on the form element and call `event.preventDefault()` to prevent the default form submission behavior.
+
+Here's an example:
+
+```jsx
+import { updateCart } from './lib.js';
+
+export default function App() {
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    // Call your Server Function here
+    updateCart(event.target);
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input type="text" name="name" />
+      <button type="submit">Submit</button>
+    </form>
+  );
+}
+```
+
+In this example, the `handleSubmit` function is called when the form is submitted. It prevents the default form submission behavior by calling `event.preventDefault()`, and then you can call your Server Function to handle the form submission.
+
+Alternatively, if you're using a Server Function as the `action` prop, you can pass a function to the `onSubmit` event handler that calls the Server Function and prevents the default form submission behavior:
+
+```jsx
+import { updateCart } from './lib.js';
+
+export default function App() {
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    updateCart(event.target);
+  };
+
+  return (
+    <form action={updateCart} onSubmit={handleSubmit}>
+      <input type="text" name="name" />
+      <button type="submit">Submit</button>
+    </form>
+  );
+}
+```
+
+In this example, the `handleSubmit` function is called when the form is submitted. It prevents the default form submission behavior by calling `event.preventDefault()`, and then calls the `updateCart` Server Function to handle the form submission.
+
+📚 SOURCES (4 found):
+  1. ### Handle form submission with a Server Function  
+Render a `<form>` with an input and submit butto...
+  2. export default function App() {
+return (
+<form action={action}>
+<Submit />
+</form>
+);
+}
+```  
+To get...
+  3. ## Usage  
+### Handle form submission on the client  
+Pass a function to the `action` prop of form t...
+
+⏱️  Response Time: 8.79s
+
+================================================================================
+Question 14/20: Show me how to optimize performance with React.memo
+================================================================================
+
+📝 ANSWER:
+Based on the provided context, it seems that React Compiler automatically optimizes your React application at build time, including memoization. However, if you want to manually optimize performance with `React.memo`, you can use it as follows:
+
+```jsx
+import React from 'react';
+
+const MyComponent = React.memo(function MyComponent() {
+  // Your component code here
+});
+```
+
+By wrapping your component with `React.memo`, you're telling React to only re-render the component if its props have changed. This can help improve performance by reducing unnecessary re-renders.
+
+However, as mentioned in the context, the React Compiler's optimization is more comprehensive than `React.memo` and can automatically memoize intermediate values and expensive computations within your components. Therefore, using `React.memo` manually might be redundant if you're using the React Compiler.
+
+📚 SOURCES (4 found):
+  1. ### How `"use memo"` marks functions for optimization  
+In a React app that uses the React Compiler,...
+  2. ## What does React Compiler do?  
+React Compiler automatically optimizes your React application at b...
+  3. ## Introduction  
+Learn [what React Compiler does](/learn/react-compiler/introduction) and how it au...
+
+⏱️  Response Time: 4.69s
+
+================================================================================
+Question 15/20: How do I use lazy loading for components?
+================================================================================
+
+📝 ANSWER:
+To use lazy loading for components, you can call the `lazy` function from the `react` module and pass a function that returns the component as an argument. Here's an example:
+
+```js
+import { lazy } from 'react';
+
+const SomeComponent = lazy(() => import('./SomeComponent'));
+```
+
+In this example, the `SomeComponent` is only loaded when it's actually rendered in the component tree. If you try to render it before it's loaded, React will suspend and display a fallback (usually a loading indicator) until the component is loaded.
+
+You can then render the lazy-loaded component like any other component:
+
+```js
+import React from 'react';
+import SomeComponent from './SomeComponent';
+
+function MyComponent() {
+  return (
+    <div>
+      <SomeComponent />
+    </div>
+  );
+}
+```
+
+Note that the `lazy` function returns a React component that you can render in your tree. While the code for the lazy component is still loading, attempting to render it will suspend. Use the `<Suspense>` component to display a loading indicator while it's loading.
+
+📚 SOURCES (4 found):
+  1. ## Reference  
+### `lazy(load)`  
+Call `lazy` outside your components to declare a lazy-loaded React...
+  2. ---
+title: lazy
+---  
+<Intro>  
+`lazy` lets you defer loading component's code until it is rendered ...
+  3. - Lazy-loading component code with [`lazy`](/reference/react/lazy)
+- Reading the value of a Promise ...
+
+⏱️  Response Time: 4.68s
+
+================================================================================
+Question 16/20: What causes unnecessary re-renders and how do I fix them?
+================================================================================
+
+📝 ANSWER:
+**What causes unnecessary re-renders?**
+
+Unnecessary re-renders can be caused by several factors:
+
+1. **Effects that update state**: When an Effect updates state, React will re-render the component, which can lead to another Effect running, and so on. This creates an infinite loop of re-renders.
+2. **Not transforming data at the top level**: If you're transforming data inside an Effect, React will re-render the component unnecessarily. Instead, transform the data at the top level of your components.
+3. **Not using `shouldComponentUpdate` or `PureComponent`**: If you're not using `shouldComponentUpdate` or `PureComponent`, React will re-render the component unnecessarily when props or state change.
+4. **Returning `false` from `shouldComponentUpdate`**: While returning `false` from `shouldComponentUpdate` can prevent unnecessary re-renders, it's not a foolproof solution. It only works if the component's props or state haven't changed.
+
+**How do I fix unnecessary re-renders?**
+
+To fix unnecessary re-renders, follow these best practices:
+
+1. **Transform data at the top level**: Move data transformation code to the top level of your components to avoid unnecessary re-renders.
+2. **Use `shouldComponentUpdate` or `PureComponent`**: Implement `shouldComponentUpdate` or use `PureComponent` to prevent unnecessary re-renders when props or state change.
+3. **Avoid updating state in Effects**: If you need to update state, do it at the top level of your components, not inside Effects.
+4. **Use `useDeferredValue` wisely**: While `useDeferredValue` can help with performance, it's not a magic solution for unnecessary re-renders. Use it judiciously and consider the implications of background re-renders.
+5. **Optimize your Effects**: Make sure your Effects are optimized and don't cause unnecessary re-renders. Use `useCallback` and `useMemo` to memoize values and prevent unnecessary Effects from running.
+
+By following these best practices, you can minimize unnecessary re-renders and improve the performance of your React application.
+
+📚 SOURCES (4 found):
+  1. - `useDeferredValue` does not by itself prevent extra network requests.  
+- There is no fixed delay ...
+  2. ## How to remove unnecessary Effects  
+There are two common cases in which you don't need Effects:  ...
+  3. Return `false` to tell React that re-rendering can be skipped.  
+#### Caveats  
+- This method *only*...
+
+⏱️  Response Time: 9.01s
+
+================================================================================
+Question 17/20: How do I use React Context API?
+================================================================================
+
+📝 ANSWER:
+To use the React Context API, you need to follow these steps:
+
+1. **Create a Context**: You can create a context using the `createContext` function from the `react` package. This function takes an initial value as an argument and returns a Context object.
+
+   ```javascript
+import { createContext } from 'react';
+
+const MyContext = createContext();
+```
+
+2. **Provide the Context**: To make the context available to your components, you need to wrap your app with a `Provider` component. The `Provider` component takes the context object as a prop and makes it available to all its children.
+
+   ```javascript
+import React from 'react';
+import ReactDOM from 'react-dom';
+import { MyContext }, MyComponent } from './MyComponent';
+
+function App() {
+  return (
+    <MyContext.Provider value={{ name: 'John Doe' }}>
+      <MyComponent />
+    </MyContext.Provider>
+  );
+}
+
+ReactDOM.render(<App />, document.getElementById('root'));
+```
+
+3. **Consume the Context**: To use the context in your components, you need to use the `useContext` hook. This hook takes the context object as an argument and returns the current value of the context.
+
+   ```javascript
+import React, { useContext } from 'react';
+import { MyContext } from './MyContext';
+
+function MyComponent() {
+  const { name } = useContext(MyContext);
+  return <div>Hello, {name}!</div>;
+}
+```
+
+That's it! With these steps, you can use the React Context API to share data between components in your app.
+
+---
+
+### Additional Resources
+
+For more information on the React Context API, you can check out the official React documentation: [React Context API](https://reactjs.org/docs/context-api.html).
+
+### Example Use Case
+
+Here's an example use case for the React Context API:
+
+Suppose you have an app that displays a list of users, and each user has a name and an email address. You can create a context to share the list of users between components.
+
+```javascript
+// usersContext.js
+import { createContext } from 'react';
+
+const UsersContext = createContext();
+
+export default UsersContext;
+```
+
+```javascript
+// App.js
+import React, { useState } from 'react';
+import UsersContext from './usersContext';
+import UserList from './UserList';
+
+function App() {
+  const [users, setUsers] = useState([
+    { id:
+
+📚 SOURCES (4 found):
+  1. <Note>  
+JSX and React are two separate things. They're often used together, but you *can* [use them...
+  2. <Note>  
+#### When to use `useEffectEvent`  
+You should use `useEffectEvent` for functions that are ...
+  3. ### React DOM
+
+⏱️  Response Time: 4.26s
+
+================================================================================
+Question 18/20: What are React portals and when should I use them?
+================================================================================
+
+📝 ANSWER:
+Based on the provided context from the official React documentation, here's a helpful answer to your question:
+
+**What are React portals and when should I use them?**
+
+React portals are a way to render children into a different part of the DOM tree than the component that owns them. They are useful when you need to render a component outside of its parent component's DOM node.
+
+You should use React portals when:
+
+* You need to render a component in a specific part of the DOM tree, but it's not a direct child of the component that owns it.
+* You want to render a component in a modal or a dialog box, and you don't want it to be a part of the main DOM tree.
+* You need to render a component in a different context, such as in a different part of the page or in a different application.
+
+To use React portals, you can use the `createPortal` function, which takes two arguments: the children to be rendered and the DOM node where they should be rendered. The `createPortal` function returns a React node that can be included in JSX or returned from a React component.
+
+Here's an example of how to use `createPortal`:
+```jsx
+import { createPortal } from 'react-dom';
+
+function Modal() {
+  return createPortal(
+    <div>
+      <h1>Hello from the modal!</h1>
+    </div>,
+    document.getElementById('modal-root')
+  );
+}
+```
+In this example, the `Modal` component uses `createPortal` to render its children into the `#modal-root` element in the DOM tree.
+
+Note that events from portals propagate according to the React tree rather than the DOM tree, so you may need to stop event propagation or move the portal up in the React tree if you encounter issues.
+
+📚 SOURCES (4 found):
+  1. In the future, we plan to add more modes to Activity for different use cases.  
+For examples on how ...
+  2. * **optional** `key`: A unique string or number to be used as the portal's [key.](/learn/rendering-l...
+  3. ---
+title: Server Components
+---  
+<Intro>  
+Server Components are a new type of Component that rend...
+
+⏱️  Response Time: 6.16s
+
+================================================================================
+Question 19/20: How do I handle errors with Error Boundaries?
+================================================================================
+
+📝 ANSWER:
+To handle errors with Error Boundaries, you can define two methods: `componentDidCatch` and optionally `static getDerivedStateFromError`. 
+
+1. `componentDidCatch` is a lifecycle method that is called when some child component throws an error during rendering. It receives two parameters: `error` (the error that was thrown) and `info` (an object containing the component stack). You can use this method to log the error to an error reporting service in production.
+
+2. `static getDerivedStateFromError` is a static method that is called after `componentDidCatch` and lets you update state in response to an error and display an error message to the user.
+
+Here's an example of how you can use these methods together:
+
+```jsx
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(error) {
+    // Update state so the next render will show the fallback UI.
+    return { hasError: true };
+  }
+
+  componentDidCatch(error, info) {
+    // You can also log the error to an error reporting service here
+    console.error(error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      // You can display a fallback UI here
+      return <h1>Something went wrong.</h1>;
+    }
+    return this.props.children;
+  }
+}
+```
+
+You can then use the `ErrorBoundary` component to wrap any components that might throw errors:
+
+```jsx
+function MyComponent() {
+  throw new Error('Something went wrong');
+}
+
+function App() {
+  return (
+    <ErrorBoundary>
+      <MyComponent />
+    </ErrorBoundary>
+  );
+}
+```
+
+If you want to use the `onCaughtError`, `onUncaughtError`, and `onRecoverableError` callbacks, you can pass them as options to the `createRoot` or `hydrateRoot` function:
+
+```jsx
+const root = createRoot(
+  document.getElementById('root'),
+  {
+    onCaughtError: (error, errorInfo) => {
+      console.error('Caught error:', error, errorInfo);
+    },
+    onUncaughtError: (error, errorInfo) => {
+      console.error('Uncaught error:', error, errorInfo);
+    },
+    onRecoverableError: (error, errorInfo) => {
+      console.error
+
+📚 SOURCES (4 found):
+  1. - `onCaughtError`: called when React catches an error in an Error Boundary.
+- `onUncaughtError`: cal...
+  2. ### `componentDidCatch(error, info)`  
+If you define `componentDidCatch`, React will call it when so...
+  3. ---
+title: error-boundaries
+---  
+<Intro>  
+Validates usage of Error Boundaries instead of try/catch...
+
+⏱️  Response Time: 6.17s
+
+================================================================================
+Question 20/20: What is React Server Components and how do they work?
+================================================================================
+
+📝 ANSWER:
+I don't know. The provided context does not mention React Server Components. However, I can suggest some possible sources where you can find the information you're looking for:
+
+- The official React documentation: You can check the React documentation for the latest information on React Server Components.
+- React blog posts: React often publishes blog posts on new features and updates, which might include information on React Server Components.
+- Online tutorials and courses: Websites like Udemy, FreeCodeCamp, and CodeSandbox often have tutorials and courses on React, which might cover React Server Components.
+
+If you have any more context or information, I'll be happy to try and help you further.
+
+📚 SOURCES (4 found):
+  1. <Note>  
+JSX and React are two separate things. They're often used together, but you *can* [use them...
+  2. ### React DOM
+  3. ## Verify Your Setup  
+After installation, verify that React Compiler is working correctly.
+
+⏱️  Response Time: 1.56s
+
+================================================================================
+📊 TEST SUMMARY REPORT
+================================================================================
+
+✅ Successful Queries: 20/20
+❌ Failed Queries: 0/20
+📈 Success Rate: 100.0%
+
+⏱️  Average Response Time: 3.83s
+📚 Average Sources Retrieved: 4.0
+📝 Average Answer Length: 1433 characters
+💻 Answers with Code Examples: 18/20
+
+⚡ Fastest Response: 0.38s
+🐌 Slowest Response: 9.01s
+
+================================================================================
+✅ Testing Complete! Results saved to 'test_results.json'
+================================================================================
