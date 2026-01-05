@@ -7,7 +7,6 @@
 [![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io/)
 [![Groq](https://img.shields.io/badge/Groq-Llama_3.1-orange)](https://groq.com/)
 
-[🚀 Live Demo](#) | [📹 Video Demo](#) | [📝 Blog Post](#)
 
 ---
 
