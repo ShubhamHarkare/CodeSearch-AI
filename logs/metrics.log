@@ -83,3 +83,4 @@
 {"operation": "set", "query": "write me a function in python to add two numbers", "cache_hit": null, "timestamp": "2026-01-05T13:30:25.448709"}
 {"operation": "set", "query": "write me a function in python to add two numbers", "cache_hit": null, "timestamp": "2026-01-05T13:30:25.448709"}
 {"operation": "set", "query": "write me a function in python to add two numbers", "cache_hit": null, "timestamp": "2026-01-05T13:30:25.448709"}
+{"operation": "get", "query": "Show me how to optimize performance with React.mem", "cache_hit": true, "timestamp": "2026-01-05T13:33:35.948218"}

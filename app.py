@@ -33,10 +33,13 @@ st.markdown("""
     
     /* Code blocks */
     .stCodeBlock {
-        background-color: #282c34;
-        border-radius: 5px;
-        margin: 1rem 0;
-    }
+    background-color: #0d1117;
+    color: #c9d1d9;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 1rem 0;
+    border: 1px solid #30363d;
+    }   
     
     /* Metrics styling */
     .stMetric {
