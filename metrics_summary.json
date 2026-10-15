@@ -1,0 +1,27 @@
+{
+  "export_timestamp": "2026-01-04T22:34:08.710005",
+  "overall_statistics": {
+    "total_queries": 3,
+    "total_errors": 0,
+    "error_rate_percent": 0.0,
+    "cache_hits": 1,
+    "cache_misses": 2,
+    "cache_hit_rate_percent": 33.33,
+    "avg_response_time": 0.496,
+    "avg_sources_per_query": 3.0,
+    "recent_queries_count": 3,
+    "fastest_response": 0.005,
+    "slowest_response": 0.812
+  },
+  "popular_queries": [
+    {
+      "query": "How do I use the useState hook?",
+      "count": 2
+    },
+    {
+      "query": "What's the difference between useState and useReducer?",
+      "count": 1
+    }
+  ],
+  "slow_queries": []
+}

@@ -1,0 +1,11 @@
+.env
+venv
+logs/
+react_db
+.env.example
+consolidated_react_docs.md
+output*
+test_results*
+test_metrics*
+__pycache__
+.dockerignore
