@@ -8,9 +8,9 @@ from codesearch.config import Settings, get_settings
 
 def test_default_settings():
     """Verify default configurations are populated correctly."""
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
-    assert settings.index.react_dev_repo == "facebook/react"
+    assert settings.index.react_dev_repo == "https://github.com/reactjs/react.dev.git"
     assert settings.index.corpus_dir == Path("data/")
     assert settings.retrieval.mode == "hybrid"
     assert settings.retrieval.bm25_k == 20
@@ -26,7 +26,7 @@ def test_environment_variable_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CODESEARCH_LLM__PROVIDER", "groq")
     monkeypatch.setenv("CODESEARCH_LLM__API_KEY", "super-secret-key")
 
-    settings = Settings()
+    settings = Settings(_env_file=None)
 
     assert settings.retrieval.mode == "dense"
     assert settings.llm.provider == "groq"
@@ -35,7 +35,7 @@ def test_environment_variable_override(monkeypatch: pytest.MonkeyPatch):
 
 def test_secret_str_masking():
     """Verify secret strings are masked when converted to string or logged."""
-    settings = Settings().with_overrides(llm={"api_key": "my-secret-key"})
+    settings = Settings(_env_file=None).with_overrides(llm={"api_key": "my-secret-key"})
     secret_key = settings.llm.api_key
 
     assert str(secret_key) == "**********"
@@ -48,12 +48,12 @@ def test_invalid_type_validation_error(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CODESEARCH_RETRIEVAL__MODE", "invalid_mode")
 
     with pytest.raises(ValidationError):
-        Settings()
+        Settings(_env_file=None)
 
 
 def test_with_overrides():
     """Verify method creates a new Settings instance with overrides applied."""
-    base_settings = Settings()
+    base_settings = Settings(_env_file=None)
     overridden = base_settings.with_overrides(
         retrieval={"mode": "bm25", "bm25_k": 50},
         llm={"provider": "ollama"},

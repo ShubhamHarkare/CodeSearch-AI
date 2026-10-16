@@ -12,7 +12,7 @@ class IndexSettings(BaseModel):
     """
 
     react_dev_repo: str = "https://github.com/reactjs/react.dev.git"
-    react_dev_sha: str = "main"
+    react_dev_sha: str = "046f17d04295ba047bb5739026b4ac3110f17028"
     corpus_dir: Path = Path("data/")
     index_dir: Path = Path("index/")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
