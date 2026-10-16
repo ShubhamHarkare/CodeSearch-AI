@@ -1,22 +1,91 @@
-# TODO(v2): project metadata, dependencies and tool settings in one file.
-#
-# What goes here:
-#   [project]            name = "codesearch", version, requires-python = ">=3.11"
-#   dependencies         core runtime deps, PINNED via uv.lock:
-#                        chromadb, sentence-transformers, rank-bm25, groq, redis,
-#                        pydantic, pydantic-settings, structlog, numpy, pyyaml, typer
-#   [project.optional-dependencies] (or [dependency-groups])
-#     api      fastapi, uvicorn[standard], sse-starlette, prometheus-client, watchdog
-#     ui       streamlit, httpx
-#     explain  scikit-learn (calibration, k-means)
-#     eval     mlflow
-#     dev      pytest, pytest-asyncio, pytest-cov, ruff, mypy, pre-commit, types-*
-#   [project.scripts]    codesearch = "codesearch.cli:app"
-#   [tool.ruff]          line-length = 100, select E,F,I,B,UP,SIM,RUF
-#   [tool.mypy]          strict = true for the codesearch package
-#   [tool.pytest.ini_options]
-#                        testpaths = ["tests"], markers: slow, needs_llm
-#                        (CI runs with -m "not needs_llm")
-#
-# Must: install with `uv sync` on a clean machine; no unpinned versions in uv.lock.
-# Phase 0.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codesearch"
+version = "0.1.0"
+description = "Explainable RAG question-answering over the React documentation"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "chromadb",
+    "sentence-transformers",
+    "rank-bm25",
+    "groq",
+    "redis",
+    "pydantic",
+    "pydantic-settings",
+    "structlog",
+    "numpy",
+    "pyyaml",
+    "typer",
+    "tenacity",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi",
+    "uvicorn[standard]",
+    "sse-starlette",
+    "prometheus-client",
+    "watchdog",
+]
+ui = [
+    "streamlit",
+    "httpx",
+]
+explain = [
+    "scikit-learn",
+]
+eval = [
+    "mlflow",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "types-pyyaml",
+    "fakeredis",   # cache tests without a Redis server
+    "httpx",       # FastAPI test client
+]
+
+[project.scripts]
+codesearch = "codesearch.cli:app"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # Pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # Ruff-specific rules
+]
+
+[tool.mypy]
+strict = true
+packages = ["codesearch"]
+
+[[tool.mypy.overrides]]
+module = ["rank_bm25.*", "sentence_transformers.*", "chromadb.*", "mlflow.*", "sklearn.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: marks tests as slow",
+    "needs_llm: marks tests that require active LLM API credentials",
+]
