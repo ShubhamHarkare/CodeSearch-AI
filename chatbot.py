@@ -1,23 +1,37 @@
-"""
-CodeSearch AI - Production-Ready Chatbot
-A semantic search engine for React documentation using RAG with Redis caching and comprehensive logging.
+# =============================================================================
+# TODO(v2): RETIRED IN v2. Do not add features here.
+# This class does everything in one place (models, retrieval, caching, logging,
+# health checks), which is why it was hard to test. In v2 its job is split:
+#   codesearch/pipeline.py         the query path, step by step
+#   codesearch/factory.py          picks Groq / Ollama / FakeLLM and the embedder
+#   codesearch/generation/llm.py   LLM clients (generate + stream)
+#   codesearch/retrieval/*         hybrid retrieval, reranker, abstain gate
+#   codesearch/cache/*             two-tier cache
+#   codesearch/api/routes_admin.py health and readiness checks
+# Keep this file only so eval/configs/v1.yaml can reproduce the v1 baseline.
+# =============================================================================
 
-Author: Your Name
-Date: January 2025
-"""
+
 
 from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from langchain_ollama import OllamaEmbeddings
+# TODO(v2): deprecated import (langchain_chroma is the replacement). In v2 only
+#     codesearch/index/vector_store.py imports chromadb.
 from langchain_community.vectorstores import Chroma
 # from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from dotenv import load_dotenv
+# TODO(v2): langchain_classic is not in requirements.txt, and these chain helpers hide
+#     every intermediate score. v2 writes each step explicitly in pipeline.py so
+#     scores can be recorded in the explanation trace (explain/trace.py).
+#     Also: ChatPromptTemplate is imported twice in this file.
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_classic.chains import create_retrieval_chain
 
-import os
+
 from typing import List, Tuple, Dict, Any, Optional
 import re
 import time
@@ -25,10 +39,15 @@ from redis_cache import RedisCache
 from logger import get_logger
 
 # Load environment variables
+# TODO(v2): no environment loading at import time. In v2 only codesearch/config.py
+#     reads env vars (pydantic-settings reads .env itself).
 load_dotenv()
-os.environ['GROQ_API_KEY'] = os.getenv("GROQ_API_KEY")
+# os.environ['GROQ_API_KEY'] = os.getenv("GROQ_API_KEY")
 
 
+# TODO(v2): the performance numbers in the docstring below come from one 35-query run
+#     and are not reproducible. In v2, numbers come only from eval/run_eval.py
+#     (logged to MLflow).
 class ReactDotChatbot:
     """
     Production-ready chatbot for React documentation queries.
@@ -50,7 +69,8 @@ class ReactDotChatbot:
     def __init__(
             self,
             db_path: str = './react_db',
-            model_name: str = 'llama-3.1-8b-instant',
+            # TODO(v2): hard-coded defaults move to LLMSettings / CacheSettings in codesearch/config.py.
+            model_name: str = 'gemma3:4b',
             use_cache: bool = True,
             redis_host: str = 'localhost',
             redis_port: int = 6379
@@ -65,10 +85,15 @@ class ReactDotChatbot:
             redis_host: Redis server host
             redis_port: Redis server port
         """
+        # TODO(v2): replace every print() with structured logs: log.get_logger(__name__)
+        #     (codesearch/log.py).
         print(" Initializing ReactDotChatbot...")
         
         # Initialize embeddings model
         print("    Loading embeddings model (Nomic-embed-text)...")
+        # TODO(v2): needs a running Ollama server, which is why the Docker image could not
+        #     answer queries. v2 default: SentenceTransformerEmbedder (bge-small) in
+        #     index/embedder.py; Ollama stays an option chosen in factory.py.
         self.embeddings = OllamaEmbeddings(model='nomic-embed-text')
 
         # Load vector database
@@ -79,14 +104,20 @@ class ReactDotChatbot:
         )
 
         # Initialize LLM
+        # TODO(v2): this message says Groq but the code below now uses ChatOllama.
         print("    Connecting to Groq LLM (Llama 3.1)...")
-        self.llm = ChatGroq(
+        # TODO(v2): ChatOllama's length limit is num_predict; check that max_tokens is really
+        #     honored. v2: generation/llm.py with GroqLLM / OllamaLLM / FakeLLM behind the
+        #     LLM protocol (interfaces.py), with timeouts, retries and stream().
+        self.llm = ChatOllama(
             model=model_name,
             temperature=0.3,  # Low temperature for factual responses
             max_tokens=500    # Limit response length for speed
         )
         
         # Create optimized prompt template
+        # TODO(v2): prompt moves to prompts/answer.yaml with a version field. It must ask for
+        #     [n] citations after each claim and allow a 'not in the React docs' answer.
         prompt = ChatPromptTemplate.from_template(
             """You are a React expert assistant. Use the following context from the official React documentation to answer the question.
 
@@ -109,6 +140,9 @@ Answer:"""
         document_chain = create_stuff_documents_chain(self.llm, prompt)
         
         # Configure retriever to fetch top 3 most relevant documents
+        # TODO(v2): dense-only top-3 with no scores and no threshold. Replace with
+        #     retrieval/hybrid.py (BM25 + dense, RRF), retrieval/rerank.py (top 5) and
+        #     retrieval/abstain.py. This exact setup becomes eval/configs/v1.yaml.
         retriever = self.vector_db.as_retriever(search_kwargs={"k": 3})
         self.retriever_chain = create_retrieval_chain(retriever, document_chain)
         
@@ -123,6 +157,8 @@ Answer:"""
         if use_cache:
             try:
                 print("    Connecting to Redis cache...")
+                # TODO(v2): cache keys must include index_version + prompt_version (cache/keys.py).
+                #     When Redis is down, fall back to cache/memory.py instead of disabling caching.
                 self.cache = RedisCache(ttl_hours=24)
                 health = self.cache.health_check()
                 if health['connected']:
@@ -138,6 +174,8 @@ Answer:"""
         
         print(" ReactDotChatbot ready!\n")
 
+    # TODO(v2): becomes AnswerPipeline.answer() and .stream() in pipeline.py. Returns a
+    #     typed Answer (schemas.py) with trace_id, citations, groundedness, confidence.
     def ask(self, query: str, bypass_cache: bool = False) -> Dict[str, Any]:
         """
         Ask a question and get an answer with sources.
@@ -212,6 +250,9 @@ Answer:"""
             answer: str = result["answer"]
             
             # Extract unique source file paths from metadata
+            # TODO(v2): set() throws away retrieval order, and these are local file paths. v2 returns
+            #     ordered Citation objects with react.dev URLs (ingest/urls.py,
+            #     generation/citations.py).
             sources: List[str] = list(set([
                 doc.metadata.get("source", "Unknown") 
                 for doc in result["context"]
@@ -246,6 +287,8 @@ Answer:"""
             # Handle errors gracefully
             error_time = time.time() - start_time
             error_response = {
+                # TODO(v2): never send raw exception text to users. Raise CodeSearchError subclasses
+                #     (errors.py); the API maps them to HTTP codes and includes a trace_id.
                 "answer": f" Error processing your question: {str(e)}",
                 "sources": [],
                 "cached": False,
@@ -339,6 +382,7 @@ Answer:"""
         """
         return self.logger.get_slow_queries(threshold_seconds, top_n)
     
+    # TODO(v2): moves to GET /healthz and GET /readyz in api/routes_admin.py.
     def health_check(self) -> Dict[str, Any]:
         """
         Check system health status.
@@ -363,6 +407,8 @@ Answer:"""
         # Check Vector DB
         try:
             # Try a simple query to verify ChromaDB is working
+            # TODO(v2): BUG: embeds a query on every Streamlit rerun, and document_count is always 1.
+            #     Use the collection count from index/vector_store.py.
             test_results = self.vector_db.similarity_search("test", k=1)
             health["components"]["chromadb"] = {
                 "status": "healthy",
@@ -379,6 +425,7 @@ Answer:"""
 
 
 # Example usage and demonstration
+# TODO(v2): demo script goes away; use `codesearch ask "..."` from cli.py.
 if __name__ == "__main__":
     print("="*70)
     print("ReactDotChatbot - Production Demo")

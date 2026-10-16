@@ -1,0 +1,13 @@
+# TODO(v2): the answer prompt, versioned. Loaded by codesearch/generation/prompts.py.
+#
+# Keys to write:
+#   version: "1"          bump on ANY change (a test fails if text changes without it);
+#                         the version is part of every cache key
+#   system: |             role + rules: answer only from the numbered context,
+#                         put [n] after each claim, say "not in the React docs"
+#                         when the context does not answer, keep it concise,
+#                         at most one code example
+#   template: |           uses {context} (numbered chunks with URLs) and {question}
+#
+# Seed it from the v1 prompt in chatbot.py, then add the citation rules.
+# Phase 1.

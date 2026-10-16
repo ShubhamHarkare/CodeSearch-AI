@@ -1,0 +1,8 @@
+# TODO(v2): rewrites a follow-up question into a standalone one.
+# Loaded by codesearch/generation/prompts.py, used by retrieval/condense.py.
+#
+# Keys to write:
+#   version: "1"
+#   template: |   uses {history} (last 3 turns) and {question}; output ONLY the
+#                 rewritten question, no explanation
+# Phase 1.

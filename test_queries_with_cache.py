@@ -1,3 +1,12 @@
+# =============================================================================
+# TODO(v2): NOT A TEST SUITE. It needs a live LLM and counts 'no exception'
+# as success, with no ground truth. In v2:
+#   - these questions seed eval/golden.jsonl (add expected_urls for each)
+#   - quality is measured by eval/run_eval.py (Recall@5, MRR, groundedness)
+#   - code correctness is checked by tests/ with FakeLLM + HashEmbedder
+# Pytest also collects files named test_*.py, so rename or remove this file.
+# =============================================================================
+
 from chatbot import ReactDotChatbot
 import json
 from datetime import datetime
@@ -15,6 +24,7 @@ class ReactChatbotTesterWithCache:
         result = self.bot.clear_cache()
         print(f"   Cleared {result.get('deleted', 0)} cached queries")
         
+        # TODO(v2): copy these questions into eval/golden.jsonl and add expected_urls.
         self.test_questions = [
             # Beginner Level (1-5)
             "How do I create a simple React component?",

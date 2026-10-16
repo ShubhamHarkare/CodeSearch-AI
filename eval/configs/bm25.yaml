@@ -1,0 +1,6 @@
+# TODO(v2): eval config 'bm25': v2 chunking, BM25 only.
+# Overrides only these Settings fields; everything else uses defaults.
+#
+#   retrieval.mode: bm25
+#   retrieval.reranker: none
+# Phase 1.

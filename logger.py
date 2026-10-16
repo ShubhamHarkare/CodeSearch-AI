@@ -1,3 +1,10 @@
+# =============================================================================
+# TODO(v2): RETIRED IN v2. Replaced by:
+#   codesearch/log.py                 structlog JSON logs with a trace_id
+#   codesearch/monitoring/windows.py  rolling in-memory stats
+#   codesearch/monitoring/prometheus.py  /metrics for Prometheus + Grafana
+# =============================================================================
+
 import logging
 import json
 from datetime import datetime
@@ -34,6 +41,8 @@ class CodeSearchLogger:
         self._setup_metrics_logger()
         
         # In-memory metrics for real-time analytics
+        # TODO(v2): per-process memory that resets on restart. v2: monitoring/windows.py
+        #     RollingWindow feeding Prometheus gauges and histograms.
         self.recent_queries = deque(maxlen=100)  # Last 100 queries
         self.total_queries = 0
         self.total_errors = 0
@@ -53,10 +62,14 @@ class CodeSearchLogger:
         
         # JSON formatter for easy parsing
         formatter = logging.Formatter(
+            # TODO(v2): hand-built JSON breaks when a message contains quotes. Use structlog's
+            #     JSONRenderer.
             '{"timestamp": "%(asctime)s", "level": "%(levelname)s", %(message)s}'
         )
         fh.setFormatter(formatter)
         
+        # TODO(v2): handlers are added every time the class is created, so a second instance
+        #     writes every line twice. Configure logging once, in the app's startup.
         self.query_logger.addHandler(fh)
         self.query_logger.propagate = False
     
@@ -128,6 +141,7 @@ class CodeSearchLogger:
         if cached:
             self.cache_hits += 1
         else:
+            # TODO(v2): failed queries are counted as cache misses, which skews the hit rate.
             self.cache_misses += 1
         
         # Create log entry
@@ -191,6 +205,8 @@ class CodeSearchLogger:
         
         self.metrics_logger.info(json.dumps(log_entry))
     
+    # TODO(v2): BUG: chatbot.py calls log_query(success=False) AND log_error() for one
+    #     failure, and both increment total_errors, so errors are double-counted.
     def log_error(self, error_type: str, error_message: str, context: Optional[Dict] = None):
         """
         Log an error with context.
@@ -330,6 +346,7 @@ class CodeSearchLogger:
         
         return summary
     
+    # TODO(v2): replaced by the Grafana dashboard (deploy/grafana/).
     def print_dashboard(self):
         """Print a real-time dashboard to console"""
         stats = self.get_statistics()
@@ -357,6 +374,7 @@ class CodeSearchLogger:
 
 
 # Global logger instance
+# TODO(v2): global singleton; v2 configures logging once in api/main.py's lifespan.
 _logger_instance = None
 
 def get_logger() -> CodeSearchLogger:

@@ -1,10 +1,23 @@
+# =============================================================================
+# TODO(v2): RETIRED IN v2. Ingestion is split into small, testable pieces:
+#   codesearch/ingest/fetch.py      react.dev at a pinned commit
+#   codesearch/ingest/mdx_clean.py  clean one page (pure function)
+#   codesearch/ingest/urls.py       file path -> react.dev URL + anchor
+#   codesearch/ingest/chunker.py    heading-aware chunks with stable IDs
+#   codesearch/ingest/manifest.py   what the index was built from
+#   codesearch/ingest/build.py      end-to-end, incremental
+#   codesearch/index/embedder.py, vector_store.py, bm25.py
+# =============================================================================
+
 # Description: Importing all necessary documents
+# TODO(v2): unused import.
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import DirectoryLoader, UnstructuredMarkdownLoader, WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
+# TODO(v2): tqdm is not in requirements.txt.
 from tqdm import tqdm  # <--- Added for progress bar
 from dotenv import load_dotenv
 import os
@@ -13,7 +26,9 @@ import re
 
 # Description: Setting up the environment variables
 load_dotenv()
-os.environ['GROQ_API_KEY'] = os.getenv('GROQ_API_KEY')
+# os.environ['GROQ_API_KEY'] = os.getenv('GROQ_API_KEY')
+# TODO(v2): BUG: os.environ[...] = None raises TypeError when the variable is unset.
+#     Optional LangSmith tracing becomes a setting in config.py.
 os.environ['LANGCHAIN_PROJECT'] = os.getenv("LANGCHAIN_PROJECT")
 os.environ['LANGCHAIN_API_KEY'] = os.getenv('LANGCHAIN_API_KEY')
 
@@ -38,16 +53,21 @@ def create_react_vector_store(
         raise IOError(f"Failed to read file {file_path}: {e}")
 
     # 2. SEMANTIC FILING
+    # TODO(v2): depends on the consolidated_react_docs.md dump. v2 reads pages directly from
+    #     a react.dev checkout at a pinned commit (ingest/fetch.py); no dump file.
     file_sections: List[str] = re.split(r'--- SOURCE: (.*?) ---', content)
     raw_documents: List[Document] = []
     
     for i in range(1, len(file_sections), 2):
         source_name: str = file_sections[i].strip()
         text_content: str = file_sections[i+1].strip()
+        # TODO(v2): this is the only MDX cleanup. ingest/mdx_clean.py must also unwrap <Sandpack>
+        #     into code fences, label <Pitfall>/<Note>, and parse the frontmatter title.
         text_content = re.sub(r'\{/\*.*?\*/\}', '', text_content)
         
         raw_documents.append(Document(
             page_content=text_content,
+            # TODO(v2): stores a local path. v2 Chunk (schemas.py) stores url, anchor, header_path.
             metadata={"source": source_name}
         ))
 
@@ -58,6 +78,8 @@ def create_react_vector_store(
         ("###", "Header 3"),
     ]
     
+    # TODO(v2): the header path only lands in metadata, so the embedder never sees it.
+    #     v2 chunker prepends it to the chunk text and never splits inside a code fence.
     header_splitter = MarkdownHeaderTextSplitter(
         headers_to_split_on=headers_to_split_on,
         strip_headers=False 
@@ -72,6 +94,7 @@ def create_react_vector_store(
 
     # 4. GRANULAR SPLITTING
     text_splitter = RecursiveCharacterTextSplitter(
+        # TODO(v2): 1000 characters, not tokens (the README says tokens). v2: IndexSettings.max_chars.
         chunk_size=1000, 
         chunk_overlap=150,
         add_start_index=True 
@@ -85,6 +108,9 @@ def create_react_vector_store(
     
     # Initialize Chroma with the first batch
     first_batch = final_docs[:batch_size]
+    # TODO(v2): no stable IDs, so re-running adds duplicate chunks. v2: chunk_id =
+    #     sha256(url + header_path + text); diff against the live index, embed only new
+    #     chunks, upsert/delete, and write index/manifest.json.
     vector_db: Chroma = Chroma.from_documents(
         documents=first_batch,
         embedding=embeddings,
@@ -104,6 +130,7 @@ if __name__ == "__main__":
     DB_DIRECTORY: str = "./react_db"
     
     try:
+        # TODO(v2): manual deletion goes away; ingest/build.py handles changes by diffing IDs.
         # Note: If you want to start fresh, delete the ./react_db folder first
         db = create_react_vector_store(INPUT_FILE, DB_DIRECTORY)
     except Exception as err:

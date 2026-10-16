@@ -1,0 +1,9 @@
+# TODO(v2): eval config 'v1': reproduces the v1 pipeline as the baseline row.
+# Overrides only these Settings fields; everything else uses defaults.
+#
+#   retrieval.mode: dense
+#   retrieval.dense_k: 3
+#   retrieval.reranker: none
+#   index.max_chars: 1000   (v1 chunking, no header path)
+#   abstain: disabled
+# Phase 1.

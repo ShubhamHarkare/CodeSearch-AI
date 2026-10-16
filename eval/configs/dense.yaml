@@ -1,0 +1,6 @@
+# TODO(v2): eval config 'dense': v2 chunking, dense retrieval only.
+# Overrides only these Settings fields; everything else uses defaults.
+#
+#   retrieval.mode: dense
+#   retrieval.reranker: none
+# Phase 1.

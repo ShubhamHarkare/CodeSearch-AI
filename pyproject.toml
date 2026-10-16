@@ -1,0 +1,22 @@
+# TODO(v2): project metadata, dependencies and tool settings in one file.
+#
+# What goes here:
+#   [project]            name = "codesearch", version, requires-python = ">=3.11"
+#   dependencies         core runtime deps, PINNED via uv.lock:
+#                        chromadb, sentence-transformers, rank-bm25, groq, redis,
+#                        pydantic, pydantic-settings, structlog, numpy, pyyaml, typer
+#   [project.optional-dependencies] (or [dependency-groups])
+#     api      fastapi, uvicorn[standard], sse-starlette, prometheus-client, watchdog
+#     ui       streamlit, httpx
+#     explain  scikit-learn (calibration, k-means)
+#     eval     mlflow
+#     dev      pytest, pytest-asyncio, pytest-cov, ruff, mypy, pre-commit, types-*
+#   [project.scripts]    codesearch = "codesearch.cli:app"
+#   [tool.ruff]          line-length = 100, select E,F,I,B,UP,SIM,RUF
+#   [tool.mypy]          strict = true for the codesearch package
+#   [tool.pytest.ini_options]
+#                        testpaths = ["tests"], markers: slow, needs_llm
+#                        (CI runs with -m "not needs_llm")
+#
+# Must: install with `uv sync` on a clean machine; no unpinned versions in uv.lock.
+# Phase 0.

@@ -1,3 +1,9 @@
+# =============================================================================
+# TODO(v2): RETIRED IN v2. Replaced by codesearch/cache/:
+#   keys.py (normalize + versioned key), exact.py (Redis), semantic.py
+#   (near-duplicate questions), memory.py (fallback LRU), tiered.py (combines).
+# =============================================================================
+
 import redis
 import json
 import hashlib
@@ -38,6 +44,7 @@ class RedisCache:
         try:
             redisUrl = os.getenv('REDIS_URL')
             if redisUrl:
+                # TODO(v2): print() -> structured logging (codesearch/log.py).
                 print(f'🔗 Connecting to Redis via URL...')
                 self.pool = redis.ConnectionPool.from_url(
                     redisUrl,
@@ -71,10 +78,14 @@ class RedisCache:
         self.key_prefix = key_prefix
 
 
+        # TODO(v2): missing ':' separator gives keys like 'codesearchstats:hits'. v2 keys look like
+        #     'codesearch:stats:hits'. Also rename stats_hits_miss -> stats_misses_key.
         self.stats_hits_key = f'{key_prefix}stats:hits'
         self.stats_hits_miss = f'{key_prefix}stats:misses'
 
 
+    # TODO(v2): only lower() + strip(); the README says punctuation is removed too.
+    #     v2 cache/keys.py normalize() must do what the README claims, with tests.
     def _normalize_query(self,query:str) -> str:
         '''
         Normalizing the query for better cache hit rates
@@ -93,6 +104,8 @@ class RedisCache:
         '''
 
         normalized = self._normalize_query(query)
+        # TODO(v2): use sha256 and include index_version + prompt_version in the key, so a
+        #     re-index or prompt change never serves stale answers.
         query_hash = hashlib.md5(normalized.encode()).hexdigest()
 
         return f'{self.key_prefix}query:{query_hash}'
@@ -119,6 +132,7 @@ class RedisCache:
                 return None
             
         except Exception as e:
+            # TODO(v2): if Redis is down, the incr() below raises again inside this except block.
             print(f'Cache read error: {e}')
             self.redis_client.incr(self.stats_hits_miss)
             return None
@@ -154,6 +168,7 @@ class RedisCache:
 
 
             pattern = f'{self.key_prefix}query*'
+            # TODO(v2): KEYS blocks Redis while it scans every key. Use scan_iter().
             total_keys = len(self.redis_client.keys(pattern))
 
 
@@ -181,6 +196,7 @@ class RedisCache:
         '''
         try:
             pattern = f'{self.key_prefix}query*'
+            # TODO(v2): same: use scan_iter() and delete in batches.
             keys = self.redis_client.keys(pattern)
 
             if keys:
@@ -197,6 +213,7 @@ class RedisCache:
             return {'deleted': 0, "error":str(e)}
         
 
+    # TODO(v2): flushdb() wipes the whole Redis DB, including other apps' data. Remove it.
     def clear_all(self) -> None:
         '''
         Clears everything including the stats
@@ -213,6 +230,8 @@ class RedisCache:
 
         """Reset hit/miss counters"""
         try:
+            # TODO(v2): BUG: self.stats_misses_key does not exist (the attribute is stats_hits_miss),
+            #     so this always raises AttributeError, which the except hides.
             self.redis_client.delete(self.stats_hits_key, self.stats_misses_key)
             print("📊 Reset cache statistics")
         except Exception as e:
@@ -226,6 +245,7 @@ class RedisCache:
             Dict with connection status and latency
         """
         try:
+            # TODO(v2): import inside a method; move to the top of the file.
             import time
             start = time.time()
             self.redis_client.ping()

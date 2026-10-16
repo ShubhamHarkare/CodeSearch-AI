@@ -1,3 +1,11 @@
+# =============================================================================
+# TODO(v2): fixes needed:
+#   - .env.example is ignored but SHOULD be committed (it documents settings)
+#   - .dockerignore is ignored but should be committed
+#   - add: .venv/, data/, index/, mlruns/, results/, *.db, .mypy_cache/,
+#     .pytest_cache/, .ruff_cache/, .DS_Store
+# =============================================================================
+
 .env
 venv
 logs/
@@ -9,3 +17,12 @@ test_results*
 test_metrics*
 __pycache__
 .dockerignore
+data/
+index/
+mlruns/
+results/
+*.db
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.DS_Store

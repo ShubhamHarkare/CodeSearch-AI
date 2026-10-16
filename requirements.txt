@@ -1,3 +1,12 @@
+# =============================================================================
+# TODO(v2): REPLACED by pyproject.toml + uv.lock (pinned versions, dependency
+# groups). Problems here: nothing pinned; chatbot.py imports langchain_classic
+# and vectorstore.py imports tqdm, neither listed. v2 drops LangChain and adds:
+# chromadb, sentence-transformers, rank-bm25, groq, redis, pydantic-settings,
+# structlog, fastapi, uvicorn, httpx, streamlit, prometheus-client, mlflow,
+# watchdog, typer; dev: pytest, ruff, mypy, pre-commit.
+# =============================================================================
+
 langchain
 langchain-community
 langchain-groq

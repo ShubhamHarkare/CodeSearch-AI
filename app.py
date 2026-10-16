@@ -1,3 +1,9 @@
+# =============================================================================
+# TODO(v2): RETIRED IN v2. Replaced by codesearch/ui/streamlit_app.py and
+# codesearch/ui/api_client.py. The v2 UI talks to the API over HTTP and never
+# imports the pipeline, so models load once in the API, not per browser tab.
+# =============================================================================
+
 """
 CodeSearch AI - Streamlit Frontend
 A professional chat interface for React documentation search
@@ -49,6 +55,7 @@ st.markdown("""
     }
     
     /* Sidebar */
+    # TODO(v2): auto-generated Streamlit class names change between versions; avoid them.
     .css-1d391kg {
         padding-top: 1rem;
     }
@@ -87,6 +94,7 @@ st.markdown("""
 # Initialize chatbot (expensive operation, do once)
 if 'chatbot' not in st.session_state:
     with st.spinner("🚀 Initializing CodeSearch AI..."):
+        # TODO(v2): loads every model once per browser session. v2 UI holds only an API client.
         st.session_state.chatbot = ReactDotChatbot(use_cache=True)
 
 # Initialize chat history
@@ -118,6 +126,8 @@ def format_response_time(seconds):
     
     return f'<span style="color: {color};">{label}: {seconds:.3f}s</span>'
 
+# TODO(v2): show citations as react.dev links, plus a 'Why this answer?' expander:
+#     score table, sentence groundedness tags, Deep explain button.
 def display_sources(sources):
     """Display sources in a clean format"""
     if not sources:
@@ -148,6 +158,8 @@ with st.sidebar:
     
     # System health check
     with st.expander("🏥 System Health", expanded=False):
+        # TODO(v2): runs on every rerun (each click), embedding a query each time. v2: call
+        #     GET /readyz through st.cache_data(ttl=30).
         health = st.session_state.chatbot.health_check()
         if health['status'] == 'healthy':
             st.success("✅ All systems operational")
@@ -266,6 +278,7 @@ if len(st.session_state.messages) == 0:
     st.info("""
     👋 **Welcome to CodeSearch AI!**
     
+    # TODO(v2): the corpus has 220 pages; don't put unmeasured claims in the UI.
     Ask me anything about React - I'll search through 500+ pages of official documentation 
     and provide accurate answers with working code examples.
     
@@ -286,6 +299,8 @@ example_questions = [
 
 for col, (btn_text, question) in zip([col1, col2, col3, col4], example_questions):
     with col:
+        # TODO(v2): example buttons duplicate the chat-input code path below. Use one
+        #     handle_question() function for both.
         if st.button(btn_text, use_container_width=True):
             # Add question to chat
             st.session_state.messages.append({
@@ -359,6 +374,8 @@ if prompt := st.chat_input("Ask me anything about React...", key="chat_input"):
         st.markdown(prompt)
     
     # Get bot response
+    # TODO(v2): blocking call. v2 streams with api_client.ask_stream() + st.write_stream,
+    #     showing sources before tokens; add thumbs up/down (POST /v1/feedback).
     response = process_query(prompt)
     
     # Add assistant message to chat

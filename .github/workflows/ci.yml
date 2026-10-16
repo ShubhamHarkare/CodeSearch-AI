@@ -1,0 +1,10 @@
+# TODO(v2): runs on every pull request and push to main.
+#   jobs.test (ubuntu-latest, Python 3.11):
+#     - actions/checkout
+#     - astral-sh/setup-uv (with cache)
+#     - uv sync --all-extras --frozen
+#     - ruff check . && ruff format --check .
+#     - mypy codesearch
+#     - pytest -m "not needs_llm and not slow" --cov=codesearch
+# Must be green on the empty skeleton before any feature code lands.
+# Phase 0.

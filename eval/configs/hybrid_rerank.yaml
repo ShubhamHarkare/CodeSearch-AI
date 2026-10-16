@@ -1,0 +1,7 @@
+# TODO(v2): eval config 'hybrid_rerank': the v2 default: hybrid + cross-encoder rerank.
+# Overrides only these Settings fields; everything else uses defaults.
+#
+#   retrieval.mode: hybrid
+#   retrieval.reranker: cross-encoder
+#   retrieval.rerank_top_n: 5
+# Phase 1.

@@ -1,3 +1,9 @@
+# =============================================================================
+# TODO(v2): REPLACED by deploy/docker-compose.yml with services api, ui, redis,
+# prometheus and grafana.
+# =============================================================================
+
+# TODO(v2): the top-level 'version' key is obsolete in Compose v2; drop it.
 version: '3.8'
 
 services:
@@ -5,6 +11,7 @@ services:
     image: redis:7-alpine
     container_name: codesearch-redis
     ports:
+      # TODO(v2): publishes Redis on the host with no password; only needed for local dev.
       - "6379:6379"
     volumes:
       - redis_data:/data

@@ -1,0 +1,11 @@
+# TODO(v2): blocks PRs that make retrieval worse.
+#   on: pull_request with paths codesearch/**, prompts/**, eval/**
+#   steps:
+#     - checkout, setup-uv, uv sync
+#     - restore the built index from actions/cache keyed by corpus SHA +
+#       embedding model + chunk params (build it with `codesearch ingest` on miss)
+#     - codesearch eval --config eval/configs/hybrid_rerank.yaml --mode retrieval
+#     - python -m eval.compare results/hybrid_rerank.json eval/baseline.json
+#     - post the markdown diff as a PR comment (e.g. marocchino/sticky-pull-request-comment)
+#   Fails when Recall@5 or MRR drops more than 2 points.
+# Phase 1 (once golden.jsonl and baseline.json exist).

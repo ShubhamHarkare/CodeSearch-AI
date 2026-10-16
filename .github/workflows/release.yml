@@ -1,0 +1,7 @@
+# TODO(v2): on push to main.
+#   - build deploy/Dockerfile and push to ghcr.io/<owner>/codesearch-ai tagged
+#     with the git SHA and "latest" (docker/build-push-action, GITHUB_TOKEN)
+#   - build the index and upload it as a GitHub Release asset named by index_version
+#   - deploy the image to Cloud Run (google-github-actions/deploy-cloudrun) or Fly.io
+#   - smoke test: curl /readyz and one /v1/ask on the deployed URL
+# Phase 4.

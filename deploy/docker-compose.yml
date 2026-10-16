@@ -1,0 +1,13 @@
+# TODO(v2): the local stack. Run with `make up`.
+#
+# services:
+#   api:        build ../ with deploy/Dockerfile; env_file ../.env; mounts ../index;
+#               depends_on redis (condition: service_healthy); port 8000
+#   ui:         same image, command: streamlit run codesearch/ui/streamlit_app.py;
+#               env API_URL=http://api:8000; port 8501
+#   redis:      redis:7-alpine, --maxmemory 256mb --maxmemory-policy allkeys-lru,
+#               healthcheck redis-cli ping; no host port needed
+#   prometheus: prom/prometheus with ./prometheus.yml (+ alert rules); port 9090
+#   grafana:    grafana/grafana with ./grafana provisioning; port 3000
+# No top-level "version:" key (obsolete).
+# Phase 3-4.

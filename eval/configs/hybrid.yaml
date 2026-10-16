@@ -1,0 +1,6 @@
+# TODO(v2): eval config 'hybrid': BM25 + dense fused with RRF, no reranker.
+# Overrides only these Settings fields; everything else uses defaults.
+#
+#   retrieval.mode: hybrid
+#   retrieval.reranker: none
+# Phase 1.

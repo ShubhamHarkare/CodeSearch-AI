@@ -1,3 +1,15 @@
+<!--
+TODO(v2): rewrite after Phase 1 with numbers from eval/run_eval.py. Claims to fix:
+  - "Llama 3.1 70B": the code used llama-3.1-8b-instant (now gemma3:4b via Ollama)
+  - "1000-token chunks": the splitter used 1000 characters
+  - "500+ pages": the corpus has 220 pages
+  - "100% accuracy" / "100% code coverage" meant "no exception" / "answer has code"
+  - the query-normalization example claims punctuation removal; the code didn't do it
+  - Quick Start copies .env.example, which was empty and gitignored
+New sections for v2: architecture diagram, ablation table, groundedness and
+abstention numbers, reliability diagram, demo GIF, how to run the eval.
+-->
+
 # ⚛️ CodeSearch AI
 
 > Semantic search engine for React documentation powered by RAG (Retrieval-Augmented Generation)

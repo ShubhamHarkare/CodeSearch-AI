@@ -1,0 +1,6 @@
+# TODO(v2): daily full evaluation with the real LLM.
+#   on: schedule (cron, e.g. 06:00 UTC) + workflow_dispatch
+#   - run eval in answer mode with secrets.GROQ_API_KEY
+#   - log to MLflow; upload results as an artifact
+#   - open a GitHub issue if groundedness or abstention regresses vs the last run
+# Phase 4.

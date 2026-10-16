@@ -1,5 +1,12 @@
+# =============================================================================
+# TODO(v2): RETIRED IN v2. Replaced by codesearch/ingest/fetch.py, which clones
+# react.dev at a pinned commit SHA and lists the pages; no consolidated dump.
+# =============================================================================
+
 import os
 from pathlib import Path
+# TODO(v2): needs a manual clone at an unrecorded commit, so the corpus can't be
+#     reproduced. v2 records the SHA in index/manifest.json.
 PARENT_DIR = './react.dev/src/content'
 #! There is a folder called learn where I can find a lot of information good for a starter
 
@@ -13,6 +20,8 @@ def consolidateMarkdownFiles(output_file:str,input_dir:str) -> None:
     #? Input: input_dir: string -> Location for the input directory
     '''
 
+    # TODO(v2): shadows the output_file parameter; the final print shows a file object,
+    #     not the file name.
     with open(output_file,'w',encoding='utf-8') as output_file:
         print(f'Starting consolidation of {input_dir}')
         file_count = 0
@@ -40,4 +49,5 @@ def consolidateMarkdownFiles(output_file:str,input_dir:str) -> None:
 
 output_filename = "consolidated_react_docs.md"
 
+# TODO(v2): runs on import. v2 work runs only behind the `codesearch ingest` CLI command.
 consolidateMarkdownFiles(output_filename,PARENT_DIR)
