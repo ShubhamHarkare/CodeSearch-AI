@@ -68,9 +68,8 @@ extend-exclude = [
     "dataScraper.py",
     "logger.py",
     "redis_cache.py",
-    "test_queries.py",
-    "test_queries_with_cache.py",
     "vectorstore.py",
+    "legacy/",
 ]
 # Make pre-commit respect the exclude list even though it passes file names.
 force-exclude = true

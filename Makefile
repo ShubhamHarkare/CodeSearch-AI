@@ -1,14 +1,33 @@
-# TODO(v2): short names for every common command, so README and CI use the same ones.
-#
-# Targets to write (each one line, calling uv / the codesearch CLI):
-#   setup     uv sync --all-extras && pre-commit install
-#   lint      ruff check . && ruff format --check . && mypy codesearch
-#   test      pytest -m "not needs_llm"
-#   ingest    codesearch ingest
-#   eval      codesearch eval --config eval/configs/hybrid_rerank.yaml
-#   ablation  run every config in eval/configs/ and write the README table
-#   serve     uvicorn codesearch.api.main:create_app --factory --reload
-#   ui        streamlit run codesearch/ui/streamlit_app.py
-#   up        docker compose -f deploy/docker-compose.yml up --build
-#
-# Phase 0 (setup, lint, test); the rest as each phase lands.
+.PHONY: setup lint test ingest eval ablation serve ui up
+
+setup:
+	uv sync --all-extras
+	uv run pre-commit install
+
+lint:
+	uv run ruff check .
+	uv run ruff format --check .
+	uv run mypy
+
+test:
+	uv run pytest -m "not needs_llm"
+
+ingest:
+	uv run codesearch ingest
+
+eval:
+	uv run codesearch eval --config eval/configs/hybrid_rerank.yaml
+
+ablation:
+	@for config in eval/configs/*.yaml; do \
+		uv run codesearch eval --config "$$config"; \
+	done
+
+serve:
+	uv run uvicorn codesearch.api.main:create_app --factory --reload
+
+ui:
+	uv run streamlit run codesearch/ui/streamlit_app.py
+
+up:
+	docker compose -f deploy/docker-compose.yml up --build

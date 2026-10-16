@@ -1,10 +1,37 @@
-# TODO(v2): runs on every pull request and push to main.
-#   jobs.test (ubuntu-latest, Python 3.11):
-#     - actions/checkout
-#     - astral-sh/setup-uv (with cache)
-#     - uv sync --all-extras --frozen
-#     - ruff check . && ruff format --check .
-#     - mypy codesearch
-#     - pytest -m "not needs_llm and not slow" --cov=codesearch
-# Must be green on the empty skeleton before any feature code lands.
-# Phase 0.
+name: CI
+
+on:
+  push:
+    branches: [main,v2]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Lint, Typecheck & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up uv with Python 3.11
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install dependencies from lockfile
+        run: uv sync --all-extras --frozen
+
+      - name: Run Ruff linter and format check
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Run Mypy static type checking
+        run: uv run mypy
+
+      - name: Run Pytest with coverage
+        run: uv run pytest -m "not needs_llm and not slow" --cov=codesearch
