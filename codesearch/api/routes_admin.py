@@ -12,5 +12,5 @@ Endpoints:
     - ``GET /metrics``: Prometheus exposition.
 
 Tested by: tests/integration/test_api.py.
-Phase: 3–4
+Phase: 3-4
 """

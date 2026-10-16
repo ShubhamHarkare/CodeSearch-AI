@@ -1,11 +1,30 @@
-# TODO(v2): checks that run before every commit.
-#
-# Hooks to add:
-#   - ruff (lint, with --fix) and ruff-format
-#   - mypy on codesearch/ (strict)
-#   - pre-commit-hooks: check-added-large-files (maxkb=1000, so a 47 MB index
-#     can never be committed again), check-yaml, check-toml, end-of-file-fixer,
-#     trailing-whitespace, detect-private-key
-#
-# Must: pass on a fresh clone with `pre-commit run --all-files`.
-# Phase 0.
+repos:
+  # Standard sanity checks (file formatting, security, file size limits)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+
+  # Ruff linter (with auto-fix) and Ruff code formatter
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # Mypy static type checker (runs within your uv virtual environment)
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false

@@ -60,6 +60,20 @@ codesearch = "codesearch.cli:app"
 
 [tool.ruff]
 line-length = 100
+# Retired v1 files: not linted. They stay on the v1 branch and get deleted
+# from v2 at the end of Phase 1 (see the To-do).
+extend-exclude = [
+    "app.py",
+    "chatbot.py",
+    "dataScraper.py",
+    "logger.py",
+    "redis_cache.py",
+    "test_queries.py",
+    "test_queries_with_cache.py",
+    "vectorstore.py",
+]
+# Make pre-commit respect the exclude list even though it passes file names.
+force-exclude = true
 
 [tool.ruff.lint]
 select = [
