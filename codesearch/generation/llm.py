@@ -6,7 +6,7 @@ What goes here:
         * ``async stream(prompt) -> AsyncIterator[str]`` yielding tokens; closes
           the upstream stream if the consumer stops (client disconnected)
         * retries with backoff on rate limits / 5xx (tenacity), raises
-          LLMTimeout / LLMUnavailable from errors.py
+          LLMTimeoutError / LLMUnavailableError from errors.py
     - ``OllamaLLM(model, base_url, ...)``: same interface, for local runs
       (you currently use gemma3:4b). Use Ollama's ``num_predict`` for max tokens.
     - ``FakeLLM(responses=None)``: deterministic, no network; by default returns

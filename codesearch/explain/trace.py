@@ -5,7 +5,7 @@ What goes here:
       ``set_used()``, ``set_sentences()``, ``set_abstain()``, ``time(step)``
       (context manager) and finally ``build() -> ExplanationTrace``.
     - ``TraceStore(db_path)``: SQLite; ``save(trace)``, ``get(trace_id)``
-      (raises TraceNotFound), ``recent(n)``; stores the trace as JSON.
+      (raises TraceNotFoundError), ``recent(n)``; stores the trace as JSON.
     - per-source "why" data: BM25 term contributions (index/bm25.py) attached
       to each used chunk.
 
