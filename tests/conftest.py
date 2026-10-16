@@ -12,3 +12,15 @@ Fixtures to write:
 Rules: no network, no real models, no Redis (use fakeredis), unless a test is
 marked ``slow`` or ``needs_llm``.
 """
+
+import os
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the developer's real env vars out of every test."""
+    for key in list(os.environ):
+        if key.startswith("CODESEARCH_"):
+            monkeypatch.delenv(key)
