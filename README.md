@@ -146,7 +146,7 @@ bot = ReactDotChatbot(use_cache=True)
 # Ask a question
 response = bot.ask("How do I use the useState hook?")
 
-print(response['answer'])
+print(response["answer"])
 print(f"Sources: {response['sources']}")
 print(f"Cached: {response['cached']}")
 print(f"Response time: {response['response_time']}s")
