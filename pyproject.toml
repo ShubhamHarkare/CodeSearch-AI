@@ -85,6 +85,11 @@ select = [
     "RUF",  # Ruff-specific rules
 ]
 
+[tool.ruff.lint.isort]
+# Always treat our own packages as first-party, so import grouping is the
+# same on every machine and in CI.
+known-first-party = ["codesearch", "eval"]
+
 [tool.mypy]
 strict = true
 packages = ["codesearch"]
