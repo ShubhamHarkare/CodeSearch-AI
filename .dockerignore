@@ -1,0 +1,23 @@
+# =============================================================================
+# TODO(v2): moves to the repo root next to deploy/Dockerfile's build context.
+# '*.md' also excludes prompts and docs the image may need; list what to
+# exclude explicitly (data/, index/, mlruns/, tests/, .venv/, .git/).
+# =============================================================================
+
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv
+.git
+.gitignore
+*.md
+logs/
+test_*.py
+output*.txt
+*.json
+.DS_Store
+.env.local

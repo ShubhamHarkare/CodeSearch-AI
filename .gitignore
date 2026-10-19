@@ -1,27 +1,27 @@
-# =============================================================================
-# TODO(v2): fixes needed:
-#   - .env.example is ignored but SHOULD be committed (it documents settings)
-#   - .dockerignore is ignored but should be committed
-#   - add: .venv/, data/, index/, mlruns/, results/, *.db, .mypy_cache/,
-#     .pytest_cache/, .ruff_cache/, .DS_Store
-# =============================================================================
+# Patterns starting with "/" only match at the repo root. Without it, "index/"
+# would also hide codesearch/index/ (the source package).
 
+# Secrets and local environments
 .env
-.venv
-logs/
-react_db
-.env.example
-consolidated_react_docs.md
-output*
-test_results*
-test_metrics*
-__pycache__
-.dockerignore
-data/
-index/
-mlruns/
-results/
+.venv/
+
+# Runtime outputs (never committed)
+/data/
+/index/
+/mlruns/
+/results/
+/logs/
 *.db
+
+# v1 leftovers kept locally
+/react_db/
+/consolidated_react_docs.md
+/output*.txt
+test_results*.json
+test_metrics*.json
+
+# Tool caches
+__pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
