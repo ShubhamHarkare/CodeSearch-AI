@@ -1,3 +1,6 @@
+# Fixture files are copied verbatim from react.dev; never let hooks rewrite them.
+exclude: ^tests/fixtures/
+
 repos:
   # Standard sanity checks (file formatting, security, file size limits)
   - repo: https://github.com/pre-commit/pre-commit-hooks
