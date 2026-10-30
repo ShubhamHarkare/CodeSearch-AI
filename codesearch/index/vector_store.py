@@ -5,6 +5,7 @@ What goes here:
       COSINE distance (Chroma's default is L2, which is wrong for our embeddings).
     - ``upsert(chunks, vectors)``: insert or update by chunk id, in batches of at
       most ``client.get_max_batch_size()`` (5,461 in Chroma 1.5).
+    - ``reset()``: drop everything, including the vector size (new embedding model).
     - ``delete(ids)``, ``all_ids() -> set[str]``, ``count() -> int``: what
       ``ingest/build.py`` needs to re-embed only new chunks and drop removed ones.
     - ``get(ids) -> list[Chunk]``: in the order asked for (Chroma doesn't promise it).
@@ -45,9 +46,18 @@ class VectorStore:
         self.client = chromadb.PersistentClient(
             path=str(self.path), settings=Settings(anonymized_telemetry=False)
         )
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name, configuration={"hnsw": {"space": "cosine"}}
+        self.collection_name = collection_name
+        self.collection = self._open_collection()
+
+    def _open_collection(self) -> Any:
+        return self.client.get_or_create_collection(
+            name=self.collection_name, configuration={"hnsw": {"space": "cosine"}}
         )
+
+    def reset(self) -> None:
+        """Delete every chunk AND the collection's vector size (for a new embedding model)."""
+        self.client.delete_collection(self.collection_name)
+        self.collection = self._open_collection()
 
     def upsert(self, chunks: list[Chunk], vectors: NDArray[np.float32]) -> None:
         """Insert or update chunks with their vectors (one row of ``vectors`` per chunk)."""
@@ -81,7 +91,7 @@ class VectorStore:
 
     def count(self) -> int:
         """Number of stored chunks."""
-        return self.collection.count()
+        return int(self.collection.count())
 
     def get(self, ids: list[str]) -> list[Chunk]:
         """Fetch chunks by id, in the order asked for; unknown ids are skipped."""

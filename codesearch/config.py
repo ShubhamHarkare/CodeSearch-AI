@@ -17,7 +17,7 @@ class IndexSettings(BaseModel):
     index_dir: Path = Path("index/")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     max_chars: int = 1000
-    chunk_overlap: int = 100
+    chunk_overlap: int = 0  # chunker doesn't apply overlap yet; see chunker.py docstring
 
 
 class RetrievalSettings(BaseModel):

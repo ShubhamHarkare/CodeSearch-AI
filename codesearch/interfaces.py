@@ -14,7 +14,11 @@ class Embedder(Protocol):
     """Interface for text embedding models."""
 
     model_name: str
-    dim: int
+
+    @property
+    def dim(self) -> int:
+        """Vector size. A property, so a real model can report it after loading lazily."""
+        ...
 
     def embed(self, texts: list[str]) -> npt.NDArray[np.float32]:
         """Embed documents into L2-normalised float32 vectors, shape (len(texts), dim)."""

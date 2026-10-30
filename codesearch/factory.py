@@ -1,11 +1,15 @@
 """Builds concrete implementations from Settings. The only place that chooses.
 
-What goes here:
-    - ``build_embedder(settings) -> Embedder``
+Written so far (Phase 1a):
+    - ``build_embedder(settings)``: "hash" -> HashEmbedder (tests, CI, quick
+      runs); anything else -> SentenceTransformerEmbedder(model name).
+    - ``load_index(settings)``: an IndexHandle holding the index on disk, or an
+      empty handle if nothing has been built yet (the API then answers 503).
+
+Still to come:
     - ``build_llm(settings) -> LLM`` (groq | ollama | fake)
     - ``build_reranker(settings) -> Reranker`` (cross-encoder | noop)
     - ``build_cache(settings, embedder) -> TieredCache``
-    - ``load_index(settings, embedder) -> IndexHandle``
     - ``build_pipeline(settings) -> AnswerPipeline`` wiring all of the above.
 
 What it must do:
@@ -15,6 +19,24 @@ What it must do:
 Must not:
     - do request-time work. Factory builds; pipeline runs.
 
-Tested by: tests/integration/test_pipeline.py builds with provider="fake".
 Phase: 1
 """
+
+from codesearch.config import Settings
+from codesearch.index.embedder import HashEmbedder, SentenceTransformerEmbedder
+from codesearch.index.handle import IndexHandle, IndexSnapshot
+from codesearch.interfaces import Embedder
+
+HASH_EMBEDDER = "hash"
+
+
+def build_embedder(settings: Settings) -> Embedder:
+    """The embedder named in settings.index.embedding_model."""
+    if settings.index.embedding_model == HASH_EMBEDDER:
+        return HashEmbedder()
+    return SentenceTransformerEmbedder(model_name=settings.index.embedding_model)
+
+
+def load_index(settings: Settings) -> IndexHandle:
+    """A handle on the index in settings.index.index_dir (empty if not built yet)."""
+    return IndexHandle(IndexSnapshot.open(settings.index.index_dir))

@@ -1,78 +1,89 @@
-"""Phase 1 tests for the real embedders (SentenceTransformerEmbedder, OllamaEmbedder).
+"""Tests for SentenceTransformerEmbedder.
 
-Skipped until those classes exist in codesearch/index/embedder.py. When you write
-them, delete the skip line below. Note: the Ollama test patches ``requests.post``;
-either add ``requests`` as a dependency or patch the HTTP client you actually use.
+The model is mocked, so these run offline in milliseconds. One test marked
+``slow`` downloads the real bge-small model; CI skips it (-m "not slow").
 """
 
+from unittest.mock import MagicMock, patch
+
+import numpy as np
 import pytest
 
-pytest.skip("Phase 1: real embedders not written yet", allow_module_level=True)
+from codesearch.index.embedder import BGE_QUERY_INSTRUCTION, SentenceTransformerEmbedder
+from codesearch.interfaces import Embedder
 
-from unittest.mock import MagicMock, patch  # noqa: E402
-
-import numpy as np  # noqa: E402
-
-from codesearch.index.embedder import OllamaEmbedder, SentenceTransformerEmbedder  # noqa: E402
-
-# =====================================================================
-# Real Model Tests (Phase 1)
-# =====================================================================
+pytest.importorskip("sentence_transformers")
 
 
-def test_sentence_transformer_lazy_loading():
-    """Verify model is not loaded during initialization."""
-    with patch("sentence_transformers.SentenceTransformer") as mock_st:
-        embedder = SentenceTransformerEmbedder(model_name="BAAI/bge-small-en-v1.5")
-        mock_st.assert_not_called()
-
-        # Accessing embed triggers load
-        embedder.embed(["test"])
-        mock_st.assert_called_once()
+def fake_model(dim: int = 384) -> MagicMock:
+    model = MagicMock()
+    model.get_sentence_embedding_dimension.return_value = dim
+    model.encode.side_effect = lambda texts, **_: np.ones((len(texts), dim), dtype=np.float64)
+    return model
 
 
-def test_sentence_transformer_bge_query_instruction():
-    """Verify BGE query prefix instruction is prepended to queries."""
-    with patch("sentence_transformers.SentenceTransformer") as mock_st_class:
-        mock_model = MagicMock()
-        mock_model.encode.return_value = np.ones((1, 384), dtype=np.float32)
-        mock_st_class.return_value = mock_model
+def test_model_is_not_loaded_until_first_use() -> None:
+    with patch("sentence_transformers.SentenceTransformer") as st:
+        st.return_value = fake_model()
+        embedder = SentenceTransformerEmbedder()
+        st.assert_not_called()
 
-        embedder = SentenceTransformerEmbedder(model_name="BAAI/bge-small-en-v1.5")
-        embedder.embed_query("find relevant docs")
+        embedder.embed(["a", "b"])
+        embedder.embed(["c"])
+        st.assert_called_once_with("BAAI/bge-small-en-v1.5", device=None)  # loaded once
 
-        # Verify query instruction was prepended in encode call
-        args, _ = mock_model.encode.call_args
-        encoded_text = args[0][0]
-        assert encoded_text.startswith("Represent this sentence for searching relevant passages:")
-        assert "find relevant docs" in encoded_text
+
+def test_documents_are_embedded_without_the_query_instruction() -> None:
+    with patch("sentence_transformers.SentenceTransformer") as st:
+        st.return_value = model = fake_model()
+        SentenceTransformerEmbedder().embed(["doc text"])
+        assert model.encode.call_args.args[0] == ["doc text"]
+        assert model.encode.call_args.kwargs["normalize_embeddings"] is True
+
+
+def test_queries_get_the_bge_instruction() -> None:
+    with patch("sentence_transformers.SentenceTransformer") as st:
+        st.return_value = model = fake_model()
+        vector = SentenceTransformerEmbedder().embed_query("find relevant docs")
+        assert model.encode.call_args.args[0] == [BGE_QUERY_INSTRUCTION + "find relevant docs"]
+        assert vector.shape == (384,)
+
+
+def test_non_bge_models_get_no_instruction() -> None:
+    with patch("sentence_transformers.SentenceTransformer") as st:
+        st.return_value = model = fake_model()
+        SentenceTransformerEmbedder("sentence-transformers/all-MiniLM-L6-v2").embed_query("q")
+        assert model.encode.call_args.args[0] == ["q"]
+
+
+def test_output_is_float32_with_the_right_shape() -> None:
+    with patch("sentence_transformers.SentenceTransformer") as st:
+        st.return_value = fake_model(dim=8)
+        out = SentenceTransformerEmbedder().embed(["a", "b", "c"])
+        assert out.dtype == np.float32
+        assert out.shape == (3, 8)
+
+
+def test_embedding_nothing_returns_an_empty_matrix() -> None:
+    with patch("sentence_transformers.SentenceTransformer") as st:
+        st.return_value = model = fake_model(dim=8)
+        out = SentenceTransformerEmbedder().embed([])
+        assert out.shape == (0, 8)
+        model.encode.assert_not_called()
+
+
+def test_satisfies_the_embedder_protocol() -> None:
+    with patch("sentence_transformers.SentenceTransformer") as st:
+        st.return_value = fake_model()
+        assert isinstance(SentenceTransformerEmbedder(), Embedder)
 
 
 @pytest.mark.slow
-def test_sentence_transformer_integration():
-    """Real model download and execution test."""
+def test_real_bge_small_model() -> None:
+    """Downloads ~130 MB the first time. Run with: uv run pytest -m slow"""
     embedder = SentenceTransformerEmbedder()
-    vectors = embedder.embed(["This is a test document."])
-
-    assert vectors.dtype == np.float32
-    assert vectors.shape[0] == 1
-    # Check L2 normalization
-    norms = np.linalg.norm(vectors, axis=1)
-    np.testing.assert_allclose(norms, 1.0, rtol=1e-4)
-
-
-def test_ollama_embedder_mocked():
-    """Verify Ollama integration formatting and output normalization."""
-    mock_response = {
-        "embeddings": [[3.0, 4.0, 0.0]]  # L2 norm = 5.0 -> Normalized = [0.6, 0.8, 0.0]
-    }
-
-    with patch("requests.post") as mock_post:
-        mock_post.return_value.status_code = 200
-        mock_post.return_value.json.return_value = mock_response
-
-        embedder = OllamaEmbedder(model_name="nomic-embed-text", base_url="http://localhost:11434")
-        vectors = embedder.embed(["test text"])
-
-        assert vectors.shape == (1, 3)
-        np.testing.assert_allclose(vectors, [[0.6, 0.8, 0.0]], rtol=1e-5)
+    docs = embedder.embed(["useState adds state to a component", "CSS grid layout"])
+    query = embedder.embed_query("how do I add state to a React component?")
+    assert docs.shape == (2, 384)
+    np.testing.assert_allclose(np.linalg.norm(docs, axis=1), 1.0, rtol=1e-4)
+    assert float(docs[0] @ query) > float(docs[1] @ query)
