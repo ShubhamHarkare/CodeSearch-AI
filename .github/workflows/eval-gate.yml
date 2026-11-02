@@ -9,3 +9,14 @@
 #     - post the markdown diff as a PR comment (e.g. marocchino/sticky-pull-request-comment)
 #   Fails when Recall@5 or MRR drops more than 2 points.
 # Phase 1 (once golden.jsonl and baseline.json exist).
+
+# Placeholder so GitHub accepts this file; it only runs if triggered by hand.
+# Replace with the real triggers and jobs in the phase noted above.
+name: eval-gate (not yet implemented)
+on:
+  workflow_dispatch:
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "TODO - not implemented yet"
