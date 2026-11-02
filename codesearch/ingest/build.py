@@ -33,7 +33,7 @@ from codesearch.config import Settings
 from codesearch.index.bm25 import BM25Index
 from codesearch.index.handle import BM25_FILE, CHROMA_DIR, IndexHandle, IndexSnapshot
 from codesearch.index.vector_store import VectorStore
-from codesearch.ingest.chunker import chunk_page
+from codesearch.ingest.chunker import chunk_page, chunk_page_fixed
 from codesearch.ingest.fetch import CorpusSnapshot, fetch_corpus
 from codesearch.ingest.manifest import (
     PIPELINE_VERSION,
@@ -77,15 +77,20 @@ def collect_chunks(corpus: CorpusSnapshot, params: ChunkParams) -> list[Chunk]:
     chunks: list[Chunk] = []
     for page_path in corpus.page_paths:
         page = clean_mdx(page_path.read_text(encoding="utf-8"))
-        chunks.extend(
-            chunk_page(
-                page,
-                url=path_to_url(page_path, corpus.content_root),
-                source_path=page_path.relative_to(corpus.content_root).as_posix(),
-                max_chars=params.max_chars,
-                overlap=params.overlap,
+        url = path_to_url(page_path, corpus.content_root)
+        source_path = page_path.relative_to(corpus.content_root).as_posix()
+        if params.strategy == "v1":
+            chunks.extend(chunk_page_fixed(page, url, source_path, max_chars=params.max_chars))
+        else:
+            chunks.extend(
+                chunk_page(
+                    page,
+                    url=url,
+                    source_path=source_path,
+                    max_chars=params.max_chars,
+                    overlap=params.overlap,
+                )
             )
-        )
     return chunks
 
 
@@ -103,7 +108,9 @@ def build_index(
 
     # 1-2. Fetch and chunk.
     corpus = fetch_corpus(cfg.react_dev_repo, cfg.react_dev_sha, cfg.corpus_dir / REPO_DIR_NAME)
-    params = ChunkParams(max_chars=cfg.max_chars, overlap=cfg.chunk_overlap)
+    params = ChunkParams(
+        max_chars=cfg.max_chars, overlap=cfg.chunk_overlap, strategy=cfg.chunk_strategy
+    )
     chunks = collect_chunks(corpus, params)
     log.info("build.chunked", pages=len(corpus.page_paths), chunks=len(chunks))
 

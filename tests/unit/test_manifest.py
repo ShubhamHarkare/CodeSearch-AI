@@ -143,7 +143,7 @@ def test_written_file_is_readable_json(tmp_path: Path) -> None:
     write_manifest(tmp_path, make_manifest())
     data = json.loads((tmp_path / "manifest.json").read_text())
     assert data["corpus_sha"] == SHA
-    assert data["chunk_params"] == {"max_chars": 1000, "overlap": 0}
+    assert data["chunk_params"] == {"max_chars": 1000, "overlap": 0, "strategy": "v2"}
 
 
 @pytest.mark.parametrize(

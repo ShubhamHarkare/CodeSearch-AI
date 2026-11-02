@@ -22,6 +22,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,7 @@ class ChunkParams(BaseModel):
 
     max_chars: int
     overlap: int
+    strategy: Literal["v2", "v1"] = "v2"
 
 
 class ChangeLogEntry(BaseModel):

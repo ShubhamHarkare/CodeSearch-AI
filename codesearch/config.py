@@ -18,6 +18,7 @@ class IndexSettings(BaseModel):
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     max_chars: int = 1000
     chunk_overlap: int = 0  # chunker doesn't apply overlap yet; see chunker.py docstring
+    chunk_strategy: Literal["v2", "v1"] = "v2"
 
 
 class RetrievalSettings(BaseModel):

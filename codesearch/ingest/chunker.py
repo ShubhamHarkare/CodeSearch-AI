@@ -179,3 +179,37 @@ def _split_prose_block(block: str, max_chars: int) -> list[str]:
     if part:
         parts.append(part)
     return parts
+
+
+def chunk_page_fixed(
+    page: CleanPage, url: str, source_path: str, max_chars: int = 1000
+) -> list[Chunk]:
+    """v1-style chunks: blind ``max_chars`` cuts of the body, no headings, no anchors.
+
+    Only used to reproduce the v1 baseline in the eval. Cuts ignore words, lines
+    and code fences on purpose; joining the pieces gives back the body exactly.
+    """
+    if max_chars <= 0:
+        raise ValueError(f"max_chars must be positive, got {max_chars}")
+
+    chunks: list[Chunk] = []
+    body = page.body
+    for index, start in enumerate(range(0, len(body), max_chars)):
+        piece = body[start : start + max_chars]
+        if not piece.strip():
+            continue  # whitespace-only slice: nothing to search
+        # "v1|" keeps these ids apart from v2 ids for the same page
+        chunk_id = hashlib.sha256(f"v1|{url}|{index}|{piece}".encode()).hexdigest()
+        chunks.append(
+            Chunk(
+                id=chunk_id,
+                url=url,
+                anchor="",
+                title=page.title,
+                header_path=(),
+                text=piece,
+                source_path=source_path,
+                start_line=0,
+            )
+        )
+    return chunks

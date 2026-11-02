@@ -72,13 +72,13 @@ def mrr(retrieved: Sequence[str], relevant: Collection[str], k: int = 10) -> flo
 def ndcg_at_k(retrieved: Sequence[str], relevant: Collection[str], k: int = 10) -> float:
     top_k = _prepare(retrieved, relevant, k)
     relevant_set = set(relevant)
-    dcg = 0
+    dcg = 0.0
     for rank, item in enumerate(top_k, start=1):
         if item in relevant_set:
             dcg += 1 / math.log2(rank + 1)
 
     n_ideal = min(len(relevant_set), k)
-    idcg = 0
+    idcg = 0.0
     for i in range(1, n_ideal + 1):
         idcg += 1 / math.log2(i + 1)
 
@@ -114,14 +114,15 @@ def abstain_precision_recall(
 
 
 def aggregate(rows: Sequence[Mapping[str, float]]) -> dict[str, float]:
-    values_per_metric, count_per_metric = {}, {}
+    values_per_metric: dict[str, float] = {}
+    count_per_metric: dict[str, int] = {}
 
     for row in rows:
         for key, value in row.items():
-            values_per_metric[key] = values_per_metric.get(key, 0) + value
+            values_per_metric[key] = values_per_metric.get(key, 0.0) + value
             count_per_metric[key] = count_per_metric.get(key, 0) + 1
 
-    aggregate_dict = {}
+    aggregate_dict: dict[str, float] = {}
 
     for key in values_per_metric:
         aggregate_dict[key] = values_per_metric[key] / count_per_metric[key]
