@@ -18,3 +18,36 @@ Tested by: tests/unit/test_rrf.py (hand-computed example, ties, item in one
 list only) and tests/integration/test_pipeline.py.
 Phase: 1
 """
+
+from codesearch.config import RetrievalSettings
+from codesearch.index.handle import IndexHandle
+from codesearch.interfaces import Embedder
+from codesearch.schemas import ScoredChunk
+
+
+class HybridRetriever:
+    def __init__(
+        self, handle: IndexHandle, embedder: Embedder, settings: RetrievalSettings
+    ) -> None:
+        self.handle = handle
+        self.embedder = embedder
+        self.settings = settings
+
+    def retrieve(self, query: str) -> list[ScoredChunk]:
+        filtered_query = query.strip()
+
+        if not filtered_query:
+            raise ValueError(f"Need proper query got: {query}")
+
+        snapshot = self.handle.snapshot()
+
+        if self.settings.mode != "dense":
+            raise NotImplementedError("bm25/hybrid come in Phase 1c")
+        vector = self.embedder.embed_query(query)
+
+        hits = snapshot.vector_store.query(vector, self.settings.dense_k)
+
+        return [
+            ScoredChunk(chunk=chunk, dense_rank=rank, dense_score=score)
+            for rank, (chunk, score) in enumerate(hits, start=1)
+        ]
