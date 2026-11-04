@@ -1,0 +1,13 @@
+# Same as hybrid_rerank, with a stronger reranker trained on broader data (handles
+# technical text better than ms-marco-MiniLM). ~1.1 GB download, slower on CPU.
+# If its MRR beats dense, make hybrid + this reranker the default.
+name: hybrid_rerank_bge
+description: hybrid RRF candidates + bge-reranker-base
+overrides:
+  retrieval:
+    mode: hybrid
+    bm25_k: 20
+    dense_k: 20
+    rrf_k: 60
+    reranker_model: BAAI/bge-reranker-base
+    rerank_top_n: 10
