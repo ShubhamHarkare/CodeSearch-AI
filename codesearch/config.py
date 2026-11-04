@@ -24,7 +24,9 @@ class IndexSettings(BaseModel):
 class RetrievalSettings(BaseModel):
     """Settings for vector search using BM25, and reranking parameters"""
 
-    mode: Literal["dense", "bm25", "hybrid"] = "hybrid"
+    # dense won the Phase 1c ablation (eval/configs, results/): hybrid RRF and hybrid +
+    # ms-marco rerank both scored lower MRR on the golden set.
+    mode: Literal["dense", "bm25", "hybrid"] = "dense"
     bm25_k: int = 20
     dense_k: int = 20
     rrf_k: int = 60

@@ -22,10 +22,10 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from codesearch.config import Settings
-from codesearch.factory import build_embedder, load_index
+from codesearch.factory import build_embedder, build_reranker, load_index
 from codesearch.ingest.manifest import read_manifest
 from codesearch.ingest.urls import url_with_anchor
-from codesearch.interfaces import Retriever
+from codesearch.interfaces import Reranker, Retriever
 from codesearch.retrieval.hybrid import HybridRetriever
 from eval.golden import load_golden
 from eval.metrics import aggregate, hit_rate_at_k, mrr, ndcg_at_k, recall_at_k, to_page
@@ -97,6 +97,17 @@ def score_row(expected_urls: Sequence[str], retrieved_urls: Sequence[str]) -> di
     return {**section_metrics, **page_metrics}
 
 
+def pool_recall(expected_urls: Sequence[str], pool_urls: Sequence[str]) -> dict[str, float]:
+    """Share of expected urls found anywhere in the candidate pool (section and page level)."""
+    k = max(len(pool_urls), 1)
+    expected_pages = [to_page(url) for url in expected_urls]
+    pool_pages = [to_page(url) for url in pool_urls]
+    return {
+        "pool_recall": recall_at_k(pool_urls, expected_urls, k),
+        "page_pool_recall": recall_at_k(pool_pages, expected_pages, k),
+    }
+
+
 @dataclass
 class EvalResult:
     """What one eval run produced (also written to results/<name>.json)."""
@@ -115,6 +126,7 @@ def run(
     golden_path: Path = GOLDEN_PATH,
     settings: Settings | None = None,
     retriever: Retriever | None = None,
+    reranker: Reranker | None = None,
     results_dir: Path = Path("results"),
     log_mlflow: bool = True,
     tracking_uri: str = DEFAULT_TRACKING_URI,
@@ -142,12 +154,19 @@ def run(
             n_abstain_skipped += 1
             continue
         results = retriever.retrieve(row.question)
+        # The candidate pool before reranking: the most any reranker could find.
+        pool_urls = [url_with_anchor(r.chunk.url, r.chunk.anchor) for r in results]
+        if settings.retrieval.reranker_model:
+            if reranker is None:
+                reranker = build_reranker(settings)  # built once, reused for every question
+            results = reranker.rerank(row.question, results, settings.retrieval.rerank_top_n)
 
         # Convert chunk results to anchor URLs
         retrieved_urls = [url_with_anchor(r.chunk.url, r.chunk.anchor) for r in results]
 
         # Score candidate matches against expected ground truth
         scores = score_row(row.expected_urls, retrieved_urls)
+        scores.update(pool_recall(row.expected_urls, pool_urls))
 
         row_record = {
             "id": row.id,
@@ -173,6 +192,10 @@ def run(
         "config": cfg.name,
         "retrieval_mode": settings.retrieval.mode,
         "dense_k": settings.retrieval.dense_k,
+        "bm25_k": settings.retrieval.bm25_k,
+        "rrf_k": settings.retrieval.rrf_k,
+        "reranker_model": settings.retrieval.reranker_model or "none",
+        "rerank_top_n": settings.retrieval.rerank_top_n,
         "chunk_strategy": settings.index.chunk_strategy,
         "embedding_model": settings.index.embedding_model,
         "index_version": index_version,

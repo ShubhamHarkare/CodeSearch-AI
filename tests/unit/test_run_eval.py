@@ -278,9 +278,11 @@ def test_score_row_needs_expected_urls() -> None:
 # =====================================================================
 
 
-def test_run_scores_only_answer_rows(tmp_path: Path) -> None:
+def test_run_scores_retrieval_only_on_answer_rows(tmp_path: Path) -> None:
     result, retriever = do_run(tmp_path)
-    assert retriever.calls == ["Q1?", "Q2?"]  # the abstain row is not retrieved
+    # every row is retrieved (the abstain gate needs the out-of-scope scores too) ...
+    assert retriever.calls == ["Q1?", "Q2?", "Vue?"]
+    # ... but retrieval metrics only cover rows that have expected urls
     assert [r["id"] for r in result.rows] == ["q001", "q002"]
 
 
@@ -339,7 +341,7 @@ def test_run_applies_config_overrides_and_records_params(tmp_path: Path) -> None
     assert result.params["chunk_strategy"] == "v2"
     assert result.params["embedding_model"] == "hash"
     assert result.params["n_questions"] == 2
-    assert result.params["n_abstain_skipped"] == 1
+    assert result.params["n_out_of_scope"] == 1
 
 
 def test_run_without_a_built_index_records_unknown_version(tmp_path: Path) -> None:
@@ -393,3 +395,100 @@ def test_run_logs_an_mlflow_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert logged.data.params["config"] == "demo"
     artifacts = {a.path for a in client.list_artifacts(logged.info.run_id)}
     assert "results.json" in artifacts
+
+
+# =====================================================================
+# run: reranking
+# =====================================================================
+
+
+class ReverseReranker:
+    """Fake reranker: reverses the candidates and cuts to top_n; records calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, int]] = []
+
+    def rerank(self, query: str, chunks: list[ScoredChunk], top_n: int) -> list[ScoredChunk]:
+        self.calls.append((query, len(chunks), top_n))
+        return list(reversed(chunks))[:top_n]
+
+
+RERANK_CFG = (
+    "name: rr\noverrides:\n  retrieval:\n    mode: hybrid\n"
+    "    reranker_model: some/model\n    rerank_top_n: 1\n"
+)
+
+
+def test_reranker_is_applied_when_the_config_names_a_model(tmp_path: Path) -> None:
+    reranker = ReverseReranker()
+    result = run(
+        config_file(tmp_path, RERANK_CFG),
+        golden_path=golden_file(tmp_path, GOLDEN),
+        settings=fresh_settings(tmp_path),
+        retriever=FakeRetriever(ANSWERS),
+        reranker=reranker,
+        results_dir=tmp_path / "results",
+        log_mlflow=False,
+    )
+    # out-of-scope rows are reranked too: the abstain gate reads their rerank scores
+    assert reranker.calls == [("Q1?", 2, 1), ("Q2?", 2, 1), ("Vue?", 1, 1)]
+    # reversed + cut to 1: q001 now gets C#x (miss), q002 gets B#other (page hit)
+    assert result.rows[0]["retrieved_urls"] == [f"{C}#x"]
+    assert result.rows[1]["retrieved_urls"] == [f"{B}#other"]
+    assert result.metrics["page_mrr"] == pytest.approx(0.5)
+
+
+def test_no_reranking_without_a_reranker_model(tmp_path: Path) -> None:
+    reranker = ReverseReranker()
+    result, _ = do_run(tmp_path, reranker=reranker)
+    assert reranker.calls == []
+    assert result.rows[0]["retrieved_urls"] == [f"{A}#usestate", f"{C}#x"]
+
+
+def test_rerank_params_are_recorded(tmp_path: Path) -> None:
+    result = run(
+        config_file(tmp_path, RERANK_CFG),
+        golden_path=golden_file(tmp_path, GOLDEN),
+        settings=fresh_settings(tmp_path),
+        retriever=FakeRetriever(ANSWERS),
+        reranker=ReverseReranker(),
+        results_dir=tmp_path / "results",
+        log_mlflow=False,
+    )
+    assert result.params["reranker_model"] == "some/model"
+    assert result.params["rerank_top_n"] == 1
+    plain, _ = do_run(tmp_path)
+    assert plain.params["reranker_model"] == "none"
+
+
+def test_pool_recall_measures_the_candidates_before_reranking(tmp_path: Path) -> None:
+    """pool_recall: share of expected urls anywhere in the candidate pool (rerank ceiling)."""
+    result = run(
+        config_file(tmp_path, RERANK_CFG),
+        golden_path=golden_file(tmp_path, GOLDEN),
+        settings=fresh_settings(tmp_path),
+        retriever=FakeRetriever(ANSWERS),
+        reranker=ReverseReranker(),
+        results_dir=tmp_path / "results",
+        log_mlflow=False,
+    )
+    # q001's pool holds A#usestate (pool hit) even though the reranked top-1 misses it
+    assert result.rows[0]["scores"]["pool_recall"] == 1.0
+    assert result.rows[0]["scores"]["recall_at_1"] == 0.0
+    assert result.rows[1]["scores"]["pool_recall"] == 0.0
+    assert result.rows[1]["scores"]["page_pool_recall"] == 1.0
+    assert result.metrics["pool_recall"] == pytest.approx(0.5)
+
+
+def test_pool_recall_is_zero_when_nothing_is_retrieved(tmp_path: Path) -> None:
+    result, _ = do_run(tmp_path, retriever=FakeRetriever({}))
+    assert result.metrics["pool_recall"] == 0.0
+    assert result.metrics["page_pool_recall"] == 0.0
+
+
+@pytest.mark.parametrize("name", ["hybrid_rerank.yaml", "dense_rerank.yaml"])
+def test_repo_rerank_configs(name: str) -> None:
+    cfg = load_config(CONFIGS / name)
+    settings = Settings(_env_file=None).with_overrides(**cfg.overrides)  # type: ignore[call-arg]
+    assert settings.retrieval.reranker_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    assert settings.retrieval.rerank_top_n == 10

@@ -8,7 +8,6 @@ Written so far (Phase 1a):
 
 Still to come:
     - ``build_llm(settings) -> LLM`` (groq | ollama | fake)
-    - ``build_reranker(settings) -> Reranker`` (cross-encoder | noop)
     - ``build_cache(settings, embedder) -> TieredCache``
     - ``build_pipeline(settings) -> AnswerPipeline`` wiring all of the above.
 
@@ -25,7 +24,8 @@ Phase: 1
 from codesearch.config import Settings
 from codesearch.index.embedder import HashEmbedder, SentenceTransformerEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
-from codesearch.interfaces import Embedder
+from codesearch.interfaces import Embedder, Reranker
+from codesearch.retrieval.rerank import CrossEncoderReranker, NoopReranker
 
 HASH_EMBEDDER = "hash"
 
@@ -40,3 +40,11 @@ def build_embedder(settings: Settings) -> Embedder:
 def load_index(settings: Settings) -> IndexHandle:
     """A handle on the index in settings.index.index_dir (empty if not built yet)."""
     return IndexHandle(IndexSnapshot.open(settings.index.index_dir))
+
+
+def build_reranker(settings: Settings) -> Reranker:
+    """A cross-encoder if settings.retrieval.reranker_model is set, else a no-op."""
+    model = settings.retrieval.reranker_model
+    if model:
+        return CrossEncoderReranker(model)
+    return NoopReranker()

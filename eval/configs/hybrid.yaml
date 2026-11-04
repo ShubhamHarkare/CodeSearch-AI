@@ -1,6 +1,10 @@
-# TODO(v2): eval config 'hybrid': BM25 + dense fused with RRF, no reranker.
-# Overrides only these Settings fields; everything else uses defaults.
-#
-#   retrieval.mode: hybrid
-#   retrieval.reranker: none
-# Phase 1.
+# v2 chunking, BM25 top-20 + dense top-20 fused with Reciprocal Rank Fusion (k=60), no reranker.
+# The metrics only look at the first 10 fused results.
+name: hybrid
+description: v2 chunking + BM25/dense fused with RRF
+overrides:
+  retrieval:
+    mode: hybrid
+    bm25_k: 20
+    dense_k: 20
+    rrf_k: 60
