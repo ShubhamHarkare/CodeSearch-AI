@@ -1,7 +1,12 @@
-# TODO(v2): eval config 'hybrid_rerank': the v2 default: hybrid + cross-encoder rerank.
-# Overrides only these Settings fields; everything else uses defaults.
-#
-#   retrieval.mode: hybrid
-#   retrieval.reranker: cross-encoder
-#   retrieval.rerank_top_n: 5
-# Phase 1.
+# Hybrid candidates (BM25 top-20 + dense top-20, fused with RRF), then a cross-encoder
+# re-scores every candidate and keeps the best 10.
+name: hybrid_rerank
+description: hybrid RRF candidates + cross-encoder rerank
+overrides:
+  retrieval:
+    mode: hybrid
+    bm25_k: 20
+    dense_k: 20
+    rrf_k: 60
+    reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+    rerank_top_n: 10

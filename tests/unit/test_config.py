@@ -12,7 +12,7 @@ def test_default_settings():
 
     assert settings.index.react_dev_repo == "https://github.com/reactjs/react.dev.git"
     assert settings.index.corpus_dir == Path("data/")
-    assert settings.retrieval.mode == "hybrid"
+    assert settings.retrieval.mode == "dense"
     assert settings.retrieval.bm25_k == 20
     assert settings.llm.provider == "fake"
     assert settings.cache.redis_url == "redis://localhost:6379/0"
@@ -65,7 +65,7 @@ def test_with_overrides():
     assert overridden.llm.provider == "ollama"
 
     # Base settings remain untouched
-    assert base_settings.retrieval.mode == "hybrid"
+    assert base_settings.retrieval.mode == "dense"
     assert base_settings.retrieval.bm25_k == 20
 
 

@@ -10,8 +10,19 @@
  "expected_urls": ["https://react.dev/reference/react/useState#updating-state-based-on-the-previous-state"],
  "category": "hooks", "expected": "answer"}
 {"id": "oos001", "question": "How do I define a computed property in Vue?",
- "expected_urls": [], "category": "out_of_scope", "expected": "abstain"}
+ "expected_urls": [], "category": "oos_frontend", "expected": "abstain"}
 ```
+
+Optional field: `notes` (why a row is hard, or where the answer actually lives).
+
+Categories: in-scope rows use a topic (`hooks`, `state`, `forms`, `troubleshooting`, ...).
+Out-of-scope rows use one of three, so abstention can be reported per difficulty:
+- `oos_general`: not about frontend at all (SQL, git, recipes)
+- `oos_frontend`: frontend but not React (CSS, Vue, Angular, plain JS)
+- `oos_react_ecosystem`: React-adjacent libraries react.dev does not document (Redux, Next.js APIs, React Navigation)
+
+Every `expected_urls` entry must be `page#anchor` exactly as the chunker produces it, or a bare
+page URL when the answer is the page intro.
 
 Target: ~150 in-scope rows (seeded from the 20 questions in v1's test_queries.py)
 plus ~25 out-of-scope rows. Every row is checked by hand before it is added.

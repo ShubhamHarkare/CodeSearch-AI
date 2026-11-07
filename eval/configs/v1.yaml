@@ -1,9 +1,15 @@
-# TODO(v2): eval config 'v1': reproduces the v1 pipeline as the baseline row.
-# Overrides only these Settings fields; everything else uses defaults.
-#
-#   retrieval.mode: dense
-#   retrieval.dense_k: 3
-#   retrieval.reranker: none
-#   index.max_chars: 1000   (v1 chunking, no header path)
-#   abstain: disabled
-# Phase 1.
+# Baseline: reproduces how v1 retrieved, with today's embedder (bge-small).
+#   - v1 chunking: blind 1,000-character cuts, no header path, no anchors
+#   - dense search only, top 3 (v1 sent 3 chunks to the LLM)
+# Needs its own index: build it with
+#   CODESEARCH_INDEX__CHUNK_STRATEGY=v1 CODESEARCH_INDEX__INDEX_DIR=index/v1 uv run codesearch ingest
+# Compare v1 against v2 at PAGE level (page_* metrics): v1 chunks have no anchors.
+name: v1
+description: v1-style chunking + dense top-3 (baseline)
+overrides:
+  index:
+    chunk_strategy: v1
+    index_dir: index/v1
+  retrieval:
+    mode: dense
+    dense_k: 3

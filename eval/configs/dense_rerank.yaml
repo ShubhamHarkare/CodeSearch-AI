@@ -1,0 +1,10 @@
+# Dense candidates only (top-30, a pool about the size of hybrid's), then the same
+# cross-encoder rerank. Compare with hybrid_rerank: does BM25 add useful candidates?
+name: dense_rerank
+description: dense top-30 candidates + cross-encoder rerank
+overrides:
+  retrieval:
+    mode: dense
+    dense_k: 30
+    reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+    rerank_top_n: 10

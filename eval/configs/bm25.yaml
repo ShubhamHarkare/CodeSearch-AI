@@ -1,6 +1,7 @@
-# TODO(v2): eval config 'bm25': v2 chunking, BM25 only.
-# Overrides only these Settings fields; everything else uses defaults.
-#
-#   retrieval.mode: bm25
-#   retrieval.reranker: none
-# Phase 1.
+# v2 chunking, BM25 keyword search only (no embeddings, no reranker).
+name: bm25
+description: v2 chunking + BM25 top-10
+overrides:
+  retrieval:
+    mode: bm25
+    bm25_k: 10

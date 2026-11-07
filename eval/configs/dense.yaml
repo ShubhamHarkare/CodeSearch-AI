@@ -1,6 +1,7 @@
-# TODO(v2): eval config 'dense': v2 chunking, dense retrieval only.
-# Overrides only these Settings fields; everything else uses defaults.
-#
-#   retrieval.mode: dense
-#   retrieval.reranker: none
-# Phase 1.
+# v2 heading-aware chunking, dense search only (no BM25, no reranker).
+name: dense
+description: v2 chunking + dense top-10
+overrides:
+  retrieval:
+    mode: dense
+    dense_k: 10

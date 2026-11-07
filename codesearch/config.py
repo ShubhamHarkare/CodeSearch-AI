@@ -17,19 +17,22 @@ class IndexSettings(BaseModel):
     index_dir: Path = Path("index/")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     max_chars: int = 1000
-    chunk_overlap: int = 100
+    chunk_overlap: int = 0  # chunker doesn't apply overlap yet; see chunker.py docstring
+    chunk_strategy: Literal["v2", "v1"] = "v2"
 
 
 class RetrievalSettings(BaseModel):
     """Settings for vector search using BM25, and reranking parameters"""
 
-    mode: Literal["dense", "bm25", "hybrid"] = "hybrid"
+    # dense won the Phase 1c ablation (eval/configs, results/): hybrid RRF and hybrid +
+    # ms-marco rerank both scored lower MRR on the golden set.
+    mode: Literal["dense", "bm25", "hybrid"] = "dense"
     bm25_k: int = 20
     dense_k: int = 20
     rrf_k: int = 60
     reranker_model: str | None = None
     rerank_top_n: int = 5
-    abstain_threshold: float = 0.5
+    abstain_threshold: float = 0.755
     history_turns: int = 3
 
 

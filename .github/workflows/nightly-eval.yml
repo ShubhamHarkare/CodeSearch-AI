@@ -4,3 +4,14 @@
 #   - log to MLflow; upload results as an artifact
 #   - open a GitHub issue if groundedness or abstention regresses vs the last run
 # Phase 4.
+
+# Placeholder so GitHub accepts this file; it only runs if triggered by hand.
+# Replace with the real triggers and jobs in the phase noted above.
+name: nightly-eval (not yet implemented)
+on:
+  workflow_dispatch:
+jobs:
+  placeholder:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "TODO - not implemented yet"
