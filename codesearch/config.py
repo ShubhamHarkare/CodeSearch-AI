@@ -32,7 +32,7 @@ class RetrievalSettings(BaseModel):
     rrf_k: int = 60
     reranker_model: str | None = None
     rerank_top_n: int = 5
-    abstain_threshold: float = 0.5
+    abstain_threshold: float = 0.755
     history_turns: int = 3
 
 

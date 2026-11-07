@@ -12,8 +12,9 @@ Must not:
 """
 
 import json
+import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -26,13 +27,57 @@ from codesearch.factory import build_embedder, build_reranker, load_index
 from codesearch.ingest.manifest import read_manifest
 from codesearch.ingest.urls import url_with_anchor
 from codesearch.interfaces import Reranker, Retriever
+from codesearch.retrieval.abstain import decide, top_signal
 from codesearch.retrieval.hybrid import HybridRetriever
+from codesearch.schemas import ScoredChunk
 from eval.golden import load_golden
-from eval.metrics import aggregate, hit_rate_at_k, mrr, ndcg_at_k, recall_at_k, to_page
+from eval.metrics import (
+    abstain_precision_recall,
+    aggregate,
+    hit_rate_at_k,
+    mrr,
+    ndcg_at_k,
+    recall_at_k,
+    to_page,
+)
 
 GOLDEN_PATH = Path(__file__).parent / "golden.jsonl"
 DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 EXPERIMENT = "codesearch-eval"
+
+
+@dataclass(frozen=True)
+class ThresholdChoice:
+    """A suggested abstain threshold and what it would cost on the golden set."""
+
+    threshold: float
+    abstain_recall: float  # share of out-of-scope questions refused
+    false_abstain_rate: float  # share of in-scope questions wrongly refused
+
+
+def choose_threshold(
+    in_scope: Sequence[float], out_of_scope: Sequence[float], target_recall: float = 0.9
+) -> ThresholdChoice:
+    """Lowest threshold that refuses at least ``target_recall`` of out-of-scope questions.
+
+    Refuse means score < threshold, so a higher threshold only ever refuses more; the
+    lowest one that meets the target therefore refuses the fewest in-scope questions.
+    """
+    if not out_of_scope:
+        raise ValueError("need at least one out-of-scope score")
+    if not 0.0 < target_recall <= 1.0:
+        raise ValueError(f"target_recall must be in (0, 1], got {target_recall}")
+
+    candidates = sorted(set(in_scope) | set(out_of_scope))
+    # Just above the highest score: refuses everything, so the loop always finds a value.
+    candidates.append(math.nextafter(candidates[-1], math.inf))
+
+    for t in candidates:
+        recall = sum(s < t for s in out_of_scope) / len(out_of_scope)
+        if recall >= target_recall:
+            false_rate = sum(s < t for s in in_scope) / len(in_scope) if in_scope else 0.0
+            return ThresholdChoice(float(t), float(recall), float(false_rate))
+    raise AssertionError("unreachable: the last candidate refuses every question")
 
 
 class EvalConfig(BaseModel):
@@ -108,6 +153,59 @@ def pool_recall(expected_urls: Sequence[str], pool_urls: Sequence[str]) -> dict[
     }
 
 
+def abstain_gate(results: Sequence[ScoredChunk], threshold: float) -> dict[str, Any]:
+    """The abstain decision for one question, or all None when it can't be judged.
+
+    BM25-only results carry no rerank or dense score, so the gate has nothing to read.
+    """
+    if results and top_signal(list(results)) is None:
+        return {"top_score": None, "score_kind": None, "abstained": None}
+    decision = decide(list(results), threshold)
+    return {
+        "top_score": decision.top_score,
+        "score_kind": decision.score_kind,
+        "abstained": decision.abstain,
+    }
+
+
+def abstain_metrics(
+    answer_rows: Sequence[dict[str, Any]], abstain_rows: Sequence[dict[str, Any]]
+) -> dict[str, float]:
+    """Abstain precision/recall over every judged row, plus the in-scope false-abstain rate."""
+    judged = [(r["abstained"], False) for r in answer_rows if r["abstained"] is not None]
+    judged += [(r["abstained"], True) for r in abstain_rows if r["abstained"] is not None]
+    if not judged:
+        return {}
+    predicted = [p for p, _ in judged]
+    expected = [e for _, e in judged]
+    precision, recall = abstain_precision_recall(predicted, expected)
+    in_scope = [p for p, e in judged if not e]
+    false_rate = sum(in_scope) / len(in_scope) if in_scope else 0.0
+    return {
+        "abstain_precision": precision,
+        "abstain_recall": recall,
+        "false_abstain_rate": false_rate,
+    }
+
+
+def suggest_threshold(
+    answer_rows: Sequence[dict[str, Any]], abstain_rows: Sequence[dict[str, Any]]
+) -> ThresholdChoice | None:
+    """choose_threshold over the judged rows' top scores (None if nothing to tune on)."""
+
+    def scores(rows: Sequence[dict[str, Any]]) -> list[float]:
+        return [
+            r["top_score"]
+            for r in rows
+            if r["abstained"] is not None and r["top_score"] is not None
+        ]
+
+    out_of_scope = scores(abstain_rows)
+    if not out_of_scope:
+        return None
+    return choose_threshold(scores(answer_rows), out_of_scope)
+
+
 @dataclass
 class EvalResult:
     """What one eval run produced (also written to results/<name>.json)."""
@@ -118,6 +216,8 @@ class EvalResult:
     rows: list[dict[str, Any]]
     params: dict[str, Any]
     results_path: Path
+    abstain_rows: list[dict[str, Any]]
+    suggested_threshold: ThresholdChoice | None
 
 
 def run(
@@ -147,12 +247,11 @@ def run(
     evaluated_rows: list[dict[str, Any]] = []
     all_scores: list[dict[str, float]] = []
     scores_by_category: dict[str, list[dict[str, float]]] = {}
-    n_abstain_skipped = 0
+    abstain_rows: list[dict[str, Any]] = []
 
     for row in golden:
-        if row.expected == "abstain":
-            n_abstain_skipped += 1
-            continue
+        # Every row is retrieved (and reranked): the abstain gate needs the
+        # out-of-scope scores as much as the in-scope ones.
         results = retriever.retrieve(row.question)
         # The candidate pool before reranking: the most any reranker could find.
         pool_urls = [url_with_anchor(r.chunk.url, r.chunk.anchor) for r in results]
@@ -160,6 +259,13 @@ def run(
             if reranker is None:
                 reranker = build_reranker(settings)  # built once, reused for every question
             results = reranker.rerank(row.question, results, settings.retrieval.rerank_top_n)
+
+        gate = abstain_gate(results, settings.retrieval.abstain_threshold)
+        if row.expected == "abstain":
+            abstain_rows.append(
+                {"id": row.id, "question": row.question, "category": row.category, **gate}
+            )
+            continue
 
         # Convert chunk results to anchor URLs
         retrieved_urls = [url_with_anchor(r.chunk.url, r.chunk.anchor) for r in results]
@@ -175,12 +281,15 @@ def run(
             "expected_urls": list(row.expected_urls),
             "retrieved_urls": retrieved_urls[:10],
             "scores": scores,
+            **gate,
         }
 
         evaluated_rows.append(row_record)
         all_scores.append(scores)
         scores_by_category.setdefault(row.category, []).append(scores)
     metrics = aggregate(all_scores)
+    metrics.update(abstain_metrics(evaluated_rows, abstain_rows))
+    suggested = suggest_threshold(evaluated_rows, abstain_rows)
     per_category = {cat: aggregate(cat_scores) for cat, cat_scores in scores_by_category.items()}
 
     # 7. Extract manifest metadata and assemble evaluation params
@@ -201,7 +310,8 @@ def run(
         "index_version": index_version,
         "corpus_sha": corpus_sha,
         "n_questions": len(evaluated_rows),
-        "n_abstain_skipped": n_abstain_skipped,
+        "n_out_of_scope": len(abstain_rows),
+        "abstain_threshold": settings.retrieval.abstain_threshold,
     }
 
     payload: dict[str, Any] = {
@@ -210,6 +320,8 @@ def run(
         "metrics": metrics,
         "per_category": per_category,
         "rows": evaluated_rows,
+        "abstain_rows": abstain_rows,
+        "suggested_threshold": asdict(suggested) if suggested else None,
     }
 
     # 8. Create results directory and save output JSON
@@ -237,6 +349,8 @@ def run(
         rows=evaluated_rows,
         params=params,
         results_path=out_file,
+        abstain_rows=abstain_rows,
+        suggested_threshold=suggested,
     )
 
 
@@ -254,6 +368,16 @@ def main(
     typer.echo(f"{result.name}: {result.params['n_questions']} questions")
     for key in SUMMARY_KEYS:
         typer.echo(f"  {key:<18} {result.metrics[key]:.3f}")
+    for key in ("abstain_recall", "false_abstain_rate"):
+        if key in result.metrics:
+            typer.echo(f"  {key:<18} {result.metrics[key]:.3f}")
+    if result.suggested_threshold:
+        t = result.suggested_threshold
+        typer.echo(
+            f"suggested abstain_threshold {t.threshold:.4f} "
+            f"(refuses {t.abstain_recall:.0%} of out-of-scope, "
+            f"{t.false_abstain_rate:.0%} of in-scope)"
+        )
     typer.echo(f"results -> {result.results_path}")
 
 
