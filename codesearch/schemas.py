@@ -115,3 +115,9 @@ class RequestSignals(BaseModel):
     top_score: float | None = None
     ttft_ms: float | None = None
     error: str | None = None
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    role: Literal["user", "assistant"]
+    content: str
