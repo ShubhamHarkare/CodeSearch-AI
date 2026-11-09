@@ -17,7 +17,7 @@ What it must do, in order:
     7. return timings for every step (retrieval_ms, ttft_ms, total_ms)
 
 Must not:
-    - import Groq, Chroma, Redis or Streamlit directly (only via interfaces),
+    - import httpx/Ollama, Chroma, Redis or Streamlit directly (only via interfaces),
       or know anything about HTTP.
 
 Tested by: tests/integration/test_pipeline.py (FakeLLM + HashEmbedder,

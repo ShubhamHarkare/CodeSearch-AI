@@ -6,8 +6,10 @@ Written so far (Phase 1a):
     - ``load_index(settings)``: an IndexHandle holding the index on disk, or an
       empty handle if nothing has been built yet (the API then answers 503).
 
+    - ``build_llm(settings)``: "ollama" -> OllamaLLM, "fake" -> FakeLLM.
+    - ``build_reranker(settings)``: cross-encoder if a model is set, else no-op.
+
 Still to come:
-    - ``build_llm(settings) -> LLM`` (groq | ollama | fake)
     - ``build_cache(settings, embedder) -> TieredCache``
     - ``build_pipeline(settings) -> AnswerPipeline`` wiring all of the above.
 
@@ -22,9 +24,10 @@ Phase: 1
 """
 
 from codesearch.config import Settings
+from codesearch.generation.llm import FakeLLM, OllamaLLM
 from codesearch.index.embedder import HashEmbedder, SentenceTransformerEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
-from codesearch.interfaces import Embedder, Reranker
+from codesearch.interfaces import LLM, Embedder, Reranker
 from codesearch.retrieval.rerank import CrossEncoderReranker, NoopReranker
 
 HASH_EMBEDDER = "hash"
@@ -48,3 +51,17 @@ def build_reranker(settings: Settings) -> Reranker:
     if model:
         return CrossEncoderReranker(model)
     return NoopReranker()
+
+
+def build_llm(settings: Settings) -> LLM:
+    """The LLM named in settings.llm.provider: a local Ollama model, or the fake."""
+    llm = settings.llm
+    if llm.provider == "ollama":
+        return OllamaLLM(
+            llm.model,
+            llm.ollama_base_url,
+            temperature=llm.temperature,
+            max_tokens=llm.max_tokens,
+            timeout_s=llm.timeout_s,
+        )
+    return FakeLLM()
