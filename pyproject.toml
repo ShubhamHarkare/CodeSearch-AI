@@ -12,7 +12,6 @@ dependencies = [
     "chromadb",
     "sentence-transformers",
     "rank-bm25",
-    "groq",
     "redis",
     "pydantic",
     "pydantic-settings",

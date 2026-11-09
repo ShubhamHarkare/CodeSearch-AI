@@ -37,8 +37,8 @@ class Embedder(Protocol):
 class LLM(Protocol):
     """Interface for text generation providers."""
 
-    async def generate(self, prompt: str) -> str:
-        """Generate a complete text response for a given prompt."""
+    async def generate(self, prompt: str, system: str | None = None) -> str:
+        """Generate a complete response; ``system`` holds the rules (system message)."""
         ...
 
     def stream(self, prompt: str) -> AsyncIterator[str]:

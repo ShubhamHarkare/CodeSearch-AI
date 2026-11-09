@@ -23,20 +23,20 @@ def test_default_settings():
 def test_environment_variable_override(monkeypatch: pytest.MonkeyPatch):
     """Verify environment variables with double underscore prefix override defaults."""
     monkeypatch.setenv("CODESEARCH_RETRIEVAL__MODE", "dense")
-    monkeypatch.setenv("CODESEARCH_LLM__PROVIDER", "groq")
-    monkeypatch.setenv("CODESEARCH_LLM__API_KEY", "super-secret-key")
+    monkeypatch.setenv("CODESEARCH_LLM__PROVIDER", "ollama")
+    monkeypatch.setenv("CODESEARCH_ADMIN__WEBHOOK_SECRET", "super-secret-key")
 
     settings = Settings(_env_file=None)
 
     assert settings.retrieval.mode == "dense"
-    assert settings.llm.provider == "groq"
-    assert settings.llm.api_key.get_secret_value() == "super-secret-key"
+    assert settings.llm.provider == "ollama"
+    assert settings.admin.webhook_secret.get_secret_value() == "super-secret-key"
 
 
 def test_secret_str_masking():
     """Verify secret strings are masked when converted to string or logged."""
-    settings = Settings(_env_file=None).with_overrides(llm={"api_key": "my-secret-key"})
-    secret_key = settings.llm.api_key
+    settings = Settings(_env_file=None).with_overrides(admin={"webhook_secret": "my-secret-key"})
+    secret_key = settings.admin.webhook_secret
 
     assert str(secret_key) == "**********"
     assert repr(secret_key) == "SecretStr('**********')"

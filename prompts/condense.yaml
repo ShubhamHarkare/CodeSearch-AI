@@ -1,8 +1,21 @@
-# TODO(v2): rewrites a follow-up question into a standalone one.
-# Loaded by codesearch/generation/prompts.py, used by retrieval/condense.py.
+# Rewrites a follow-up question into a standalone one, so retrieval works without
+# the chat history. Loaded by codesearch/generation/prompts.py, used by
+# codesearch/retrieval/condense.py.
 #
-# Keys to write:
-#   version: "1"
-#   template: |   uses {history} (last 3 turns) and {question}; output ONLY the
-#                 rewritten question, no explanation
-# Phase 1.
+# Bump `version` on ANY change (tests/unit/test_prompts.py guards it).
+version: "1"
+
+system: |
+  You rewrite a follow-up question from a conversation about React into a single
+  standalone question that can be understood without the conversation.
+  Keep the user's intent and any React API names. If the follow-up is already
+  standalone, return it unchanged. Output ONLY the rewritten question: no
+  explanation, no quotes, no prefix.
+
+template: |
+  Conversation so far:
+  {history}
+
+  Follow-up question: {question}
+
+  Standalone question:

@@ -39,13 +39,12 @@ class RetrievalSettings(BaseModel):
 class LLMSettings(BaseModel):
     """LLM provider and inference configurations."""
 
-    provider: Literal["groq", "ollama", "fake"] = "fake"
-    model: str = "llama-3.3-70b-versatile"
+    provider: Literal["ollama", "fake"] = "fake"
+    model: str = "gemma3:4b"
     temperature: float = 0.0
     max_tokens: int = 1024
-    timeout_s: float = 30.0
-    max_retries: int = 3
-    api_key: SecretStr = SecretStr("")
+    timeout_s: float = 120.0  # local models on a laptop CPU/GPU can take a while
+    ollama_base_url: str = "http://localhost:11434"
 
 
 class CacheSettings(BaseModel):
@@ -93,7 +92,7 @@ class Settings(BaseSettings):
         """Return a new Settings instance with specified field overrides.
 
         Useful for unit tests, evaluation setups, or benchmarking runs.
-        Supports passing sub-dictionaries (e.g., llm={"provider": "groq"}).
+        Supports passing sub-dictionaries (e.g., llm={"provider": "ollama"}).
         """
         current_data = self.model_dump()
         for key, value in kwargs.items():
