@@ -65,8 +65,8 @@ class Answer(BaseModel):
     text: str
     citations: list[Citation]
     abstained: bool
-    confidence: float = Field(ge=0, le=1)
-    groundedness: float = Field(ge=0, le=1)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    groundedness: float | None = Field(default=None, ge=0, le=1)
     cache_tier: Literal["exact", "semantic"] | None = None
     timings: dict[str, float] = Field(default_factory=dict)
     trace_id: str

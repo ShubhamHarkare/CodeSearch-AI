@@ -23,11 +23,15 @@ Must not:
 Phase: 1
 """
 
+# from mlflow.tracking._model_registry.fluent import load_prompt
 from codesearch.config import Settings
 from codesearch.generation.llm import FakeLLM, OllamaLLM
+from codesearch.generation.prompts import load_prompt
 from codesearch.index.embedder import HashEmbedder, SentenceTransformerEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
 from codesearch.interfaces import LLM, Embedder, Reranker
+from codesearch.pipeline import AnswerPipeline
+from codesearch.retrieval.hybrid import HybridRetriever
 from codesearch.retrieval.rerank import CrossEncoderReranker, NoopReranker
 
 HASH_EMBEDDER = "hash"
@@ -65,3 +69,24 @@ def build_llm(settings: Settings) -> LLM:
             timeout_s=llm.timeout_s,
         )
     return FakeLLM()
+
+
+def build_pipeline(settings: Settings) -> AnswerPipeline:
+    handle = load_index(settings)
+    retriever = HybridRetriever(handle, build_embedder(settings), settings.retrieval)
+
+    reranker = build_reranker(settings)
+    llm = build_llm(settings)
+
+    answer_prompt = load_prompt("answer")
+    condense_prompt = load_prompt("condense")
+
+    return AnswerPipeline(
+        handle=handle,
+        retriever=retriever,
+        reranker=reranker,
+        llm=llm,
+        answer_prompt=answer_prompt,
+        condense_prompt=condense_prompt,
+        settings=settings,
+    )

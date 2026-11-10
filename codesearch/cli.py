@@ -15,13 +15,14 @@ Tested by: tests/integration/test_cli.py (Typer's CliRunner).
 Phase: 1
 """
 
+import asyncio
 from typing import Annotated
 
 import typer
 
 from codesearch.config import Settings, get_settings
-from codesearch.errors import CodeSearchError
-from codesearch.factory import build_embedder
+from codesearch.errors import CodeSearchError, IndexNotReadyError, LLMUnavailableError
+from codesearch.factory import build_embedder, build_pipeline
 from codesearch.ingest.build import build_index
 from codesearch.ingest.manifest import read_manifest
 from codesearch.log import configure_logging
@@ -76,6 +77,32 @@ def index_info() -> None:
         typer.echo(f"No index in {settings.index.index_dir}. Run: codesearch ingest")
         raise typer.Exit(code=1)
     typer.echo(manifest.model_dump_json(indent=2))
+
+
+@app.command()
+def ask(question: str) -> None:
+    try:
+        settings = get_settings()
+        pipeline = build_pipeline(settings)
+        answer = asyncio.run(pipeline.answer(question))
+    except IndexNotReadyError as e:
+        typer.echo(
+            f"Index is not ready. Run `codesearch ingest` to build it first.\nDetails: {e}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from e
+    except LLMUnavailableError as e:
+        typer.echo(f"LLM Service Error: {e}", err=True)
+        raise typer.Exit(code=1) from e
+
+    # Output the generated text
+    typer.echo(answer.text)
+
+    # Output citations if available
+    if answer.citations:
+        typer.echo("\nSources:")
+        for citation in answer.citations:
+            typer.echo(f"[{citation.number}] {citation.url}")
 
 
 if __name__ == "__main__":
