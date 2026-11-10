@@ -83,3 +83,10 @@ class TraceNotFoundError(CodeSearchError):
 
     http_status: int = 404
     public_message: str = "Requested trace ID was not found."
+
+
+class CacheUnavailableError(CodeSearchError):
+    """Raised when Redis can't be reached; tiered.py falls back to memory."""
+
+    http_status: int = 503
+    public_message: str = "The cache is unavailable."
