@@ -4,4 +4,4 @@ description: v2 chunking + dense top-10
 overrides:
   retrieval:
     mode: dense
-    dense_k: 10
+    dense_k: 2
