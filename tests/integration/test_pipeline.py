@@ -8,13 +8,19 @@ cases are added in later phases.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
+import fakeredis
 import pytest
 
+from codesearch.cache.exact import RedisExactCache
+from codesearch.cache.memory import LRUCache
+from codesearch.cache.semantic import SemanticCache
+from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
 from codesearch.errors import IndexNotReadyError, LLMUnavailableError
-from codesearch.factory import build_pipeline
+from codesearch.factory import build_cache, build_pipeline
 from codesearch.generation.llm import FakeLLM
 from codesearch.generation.prompts import load_prompt
 from codesearch.index.embedder import HashEmbedder
@@ -78,6 +84,8 @@ def make(
     reranker: Any = None,
     threshold: float = ALWAYS_ANSWER,
     handle: IndexHandle | None = None,
+    cache: Any = None,
+    answer_prompt: Any = None,
     **retrieval: Any,
 ) -> tuple[AnswerPipeline, Any]:
     settings, snapshot = built
@@ -89,9 +97,10 @@ def make(
         retriever=HybridRetriever(handle, HashEmbedder(), settings.retrieval),
         reranker=reranker if reranker is not None else NoopReranker(),
         llm=llm,
-        answer_prompt=load_prompt("answer"),
+        answer_prompt=answer_prompt if answer_prompt is not None else load_prompt("answer"),
         condense_prompt=load_prompt("condense"),
         settings=settings,
+        cache=cache,
     )
     return pipeline, llm
 
@@ -274,3 +283,175 @@ async def test_build_pipeline_wires_everything_from_settings(built: Any) -> None
     answer = await pipeline.answer(QUESTION)
     assert answer.abstained is False
     assert answer.citations
+
+
+# =====================================================================
+# Cache (exact before retrieval, semantic after retrieval)
+# =====================================================================
+
+
+def memory_cache() -> TieredCache:
+    """Both exact tiers in memory (no Redis needed) plus a real semantic tier."""
+    return TieredCache(
+        exact=LRUCache(), fallback=LRUCache(), semantic=SemanticCache(HashEmbedder())
+    )
+
+
+async def test_a_repeated_question_is_an_exact_hit_without_calling_the_llm(built: Any) -> None:
+    cache = memory_cache()
+    pipeline, llm = make(built, cache=cache)
+    first = await pipeline.answer(QUESTION)
+    second = await pipeline.answer(QUESTION)
+    assert len(llm.prompts) == 1
+    assert second.cache_tier == "exact"
+    assert second.text == first.text
+    assert second.citations == first.citations
+    assert first.cache_tier is None
+
+
+async def test_a_cache_hit_gets_its_own_trace_id_and_timings(built: Any) -> None:
+    pipeline, _ = make(built, cache=memory_cache())
+    first = await pipeline.answer(QUESTION)
+    second = await pipeline.answer(QUESTION)
+    assert second.trace_id != first.trace_id
+    assert "total_ms" in second.timings
+    assert "generation_ms" not in second.timings  # nothing was generated this time
+
+
+async def test_spelling_variants_share_the_exact_key(built: Any) -> None:
+    pipeline, llm = make(built, cache=memory_cache())
+    await pipeline.answer(QUESTION)
+    again = await pipeline.answer("  how do i update state based on the previous state  ")
+    assert again.cache_tier == "exact"
+    assert len(llm.prompts) == 1
+
+
+async def test_a_paraphrase_is_a_semantic_hit(built: Any) -> None:
+    """The hash embedder is a bag of words: the same words reordered embed identically,
+    so retrieval finds the same top chunk and the cosine is 1.0."""
+    pipeline, llm = make(built, cache=memory_cache())
+    await pipeline.answer(QUESTION)
+    paraphrase = "Based on the previous state how do I update state?"
+    hit = await pipeline.answer(paraphrase)
+    assert hit.cache_tier == "semantic"
+    assert len(llm.prompts) == 1
+
+
+async def test_abstained_answers_are_not_cached(built: Any) -> None:
+    cache = memory_cache()
+    pipeline, _ = make(built, cache=cache, threshold=ALWAYS_ABSTAIN)
+    await pipeline.answer(QUESTION)
+    second = await pipeline.answer(QUESTION)
+    assert second.cache_tier is None
+    assert cache.stats()["exact_hits"] == 0
+
+
+async def test_a_model_refusal_is_not_cached(built: Any) -> None:
+    llm = FakeLLM(responses=[NOT_COVERED, "Use an updater [1]."])
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    first = await pipeline.answer(QUESTION)
+    second = await pipeline.answer(QUESTION)
+    assert first.abstained is True
+    assert second.abstained is False  # the LLM was asked again
+    assert len(llm.prompts) == 2
+
+
+async def test_bypass_cache_skips_the_lookup_but_refreshes_the_entry(built: Any) -> None:
+    llm = FakeLLM(responses=["Old [1].", "New [1]."])
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    await pipeline.answer(QUESTION)
+    fresh = await pipeline.answer(QUESTION, bypass_cache=True)
+    assert fresh.cache_tier is None
+    assert fresh.text == "New [1]."
+    third = await pipeline.answer(QUESTION)
+    assert third.cache_tier == "exact"
+    assert third.text == "New [1]."  # the refreshed answer was stored
+
+
+async def test_a_new_prompt_version_never_serves_old_answers(built: Any) -> None:
+    cache = memory_cache()
+    old_pipeline, _ = make(built, cache=cache)
+    await old_pipeline.answer(QUESTION)
+    new_prompt = dataclasses.replace(load_prompt("answer"), version="999")
+    new_pipeline, new_llm = make(built, cache=cache, answer_prompt=new_prompt)
+    answer = await new_pipeline.answer(QUESTION)
+    assert answer.cache_tier is None
+    assert len(new_llm.prompts) == 1
+
+
+async def test_follow_ups_are_cached_under_the_condensed_question(built: Any) -> None:
+    """ "what about objects?" means different things in different chats, so the key is
+    built from the standalone rewrite, never the raw follow-up."""
+    llm = FakeLLM(responses=[REWRITE, "Copy the object first [1]."])
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    await pipeline.answer("what about objects?", history=HISTORY)
+    direct = await pipeline.answer(REWRITE)
+    assert direct.cache_tier == "exact"
+    assert len(llm.prompts) == 2  # condense + one answer, nothing for the direct ask
+
+
+async def test_redis_down_still_answers(built: Any) -> None:
+    server = fakeredis.FakeServer()
+    server.connected = False
+    cache = TieredCache(
+        exact=RedisExactCache(client=fakeredis.FakeRedis(server=server, decode_responses=True)),
+        fallback=LRUCache(),
+        semantic=SemanticCache(HashEmbedder()),
+    )
+    pipeline, _ = make(built, cache=cache)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is False
+    assert cache.degraded is True
+    again = await pipeline.answer(QUESTION)
+    assert again.cache_tier == "exact"  # served from the memory fallback
+
+
+async def test_no_cache_means_every_question_reaches_the_llm(built: Any) -> None:
+    pipeline, llm = make(built)
+    await pipeline.answer(QUESTION)
+    await pipeline.answer(QUESTION)
+    assert len(llm.prompts) == 2
+
+
+# =====================================================================
+# factory.build_cache
+# =====================================================================
+
+
+def test_build_cache_from_settings(built: Any) -> None:
+    settings, _ = built
+    cache = build_cache(settings, HashEmbedder())
+    assert isinstance(cache, TieredCache)
+    assert isinstance(cache.exact, RedisExactCache)
+    assert isinstance(cache.fallback, LRUCache)
+    assert isinstance(cache.semantic, SemanticCache)
+    assert cache.semantic.threshold == settings.cache.semantic_threshold
+
+
+def test_build_cache_can_be_disabled(built: Any) -> None:
+    settings, _ = built
+    assert build_cache(settings.with_overrides(cache={"enabled": False}), HashEmbedder()) is None
+
+
+def test_build_cache_without_the_semantic_tier(built: Any) -> None:
+    settings, _ = built
+    cache = build_cache(settings.with_overrides(cache={"semantic_enabled": False}), HashEmbedder())
+    assert cache is not None
+    assert cache.semantic is None
+
+
+def test_build_pipeline_includes_the_cache(built: Any) -> None:
+    settings, _ = built
+    assert isinstance(build_pipeline(settings).cache, TieredCache)
+
+
+async def test_a_caller_supplied_trace_id_is_used(built: Any) -> None:
+    """The API passes the request's X-Trace-Id so logs, header and body all match."""
+    pipeline, _ = make(built)
+    assert (await pipeline.answer(QUESTION, trace_id="req-1")).trace_id == "req-1"
+
+
+async def test_a_cache_hit_takes_the_callers_trace_id(built: Any) -> None:
+    pipeline, _ = make(built, cache=memory_cache())
+    await pipeline.answer(QUESTION)
+    assert (await pipeline.answer(QUESTION, trace_id="req-2")).trace_id == "req-2"

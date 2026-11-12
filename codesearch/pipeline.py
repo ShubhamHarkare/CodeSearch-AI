@@ -28,7 +28,9 @@ Phase: 1 (answer), 2 (explain hooks), 3 (stream)
 
 import time
 from collections.abc import Sequence
+from typing import TYPE_CHECKING, Literal
 
+from codesearch.cache.keys import make_key
 from codesearch.config import Settings
 from codesearch.generation.citations import strip_invalid, to_citations
 from codesearch.generation.prompts import PromptTemplate, format_context
@@ -38,6 +40,9 @@ from codesearch.log import new_trace_id
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE, decide
 from codesearch.retrieval.condense import condense
 from codesearch.schemas import Answer, ChatMessage
+
+if TYPE_CHECKING:
+    from codesearch.cache.tiered import TieredCache
 
 
 class AnswerPipeline:
@@ -51,6 +56,7 @@ class AnswerPipeline:
         answer_prompt: PromptTemplate,
         condense_prompt: PromptTemplate,
         settings: Settings,
+        cache: "TieredCache | None" = None,
     ) -> None:
         self.handle = handle
         self.retriver = retriever
@@ -59,13 +65,21 @@ class AnswerPipeline:
         self.answer_prompt = answer_prompt
         self.condense_prompt = condense_prompt
         self.settings = settings
+        self.cache = cache
 
-    async def answer(self, question: str, history: Sequence[ChatMessage] | None = None) -> Answer:
+    async def answer(
+        self,
+        question: str,
+        history: Sequence[ChatMessage] | None = None,
+        *,
+        bypass_cache: bool = False,
+        trace_id: str | None = None,
+    ) -> Answer:
         if not question:
             raise ValueError(f"Expected question got: {question}")
 
         pipeline_start = time.perf_counter()
-        trace_id = new_trace_id()
+        trace_id = trace_id or new_trace_id()
         timings: dict[str, float] = {}
 
         # HACK: The below code is for condensing the history and the new question
@@ -82,6 +96,14 @@ class AnswerPipeline:
             timings["condense_ms"] = (time.perf_counter() - t0) * 1000.0
         else:
             search_q = question
+
+        # Exact cache, keyed on the standalone question + everything that changes the answer.
+        key = make_key(
+            search_q, self.handle.version, self.answer_prompt.version, self.settings.llm.model
+        )
+        cache = None if bypass_cache else self.cache
+        if cache is not None and (hit := cache.get(key)) is not None:
+            return self._replay(hit, "exact", trace_id, timings, pipeline_start)
 
         # HACK: This is for retrieval
         t0 = time.perf_counter()
@@ -109,6 +131,16 @@ class AnswerPipeline:
                 prompt_version=self.answer_prompt.version,
             )
 
+        similar = {
+            "top1": chunks[0].chunk.id,
+            "index_version": self.handle.version,
+            "prompt_version": self.answer_prompt.version,
+            "model": self.settings.llm.model,
+        }
+        if cache is not None and (hit := cache.lookup_similar(search_q, **similar)) is not None:
+            cache.set(key, hit)
+            return self._replay(hit, "semantic", trace_id, timings, pipeline_start)
+
         # HACK if we do not abstain and get the answer then this is the code for that
         t0 = time.perf_counter()
         prompt = self.answer_prompt.render(context=format_context(chunks), question=search_q)
@@ -127,7 +159,7 @@ class AnswerPipeline:
 
         # Step 11: Return completed Answer with total timing
         timings["total_ms"] = (time.perf_counter() - pipeline_start) * 1000.0
-        return Answer(
+        answer = Answer(
             text=text,
             citations=citations,
             abstained=abstained,
@@ -136,3 +168,18 @@ class AnswerPipeline:
             index_version=self.handle.version,
             prompt_version=self.answer_prompt.version,
         )
+        if self.cache is not None and not abstained:
+            self.cache.set(key, answer)
+            self.cache.add_similar(search_q, answer, **similar)
+        return answer
+
+    @staticmethod
+    def _replay(
+        hit: Answer,
+        tier: Literal["exact", "semantic"],
+        trace_id: str,
+        timings: dict[str, float],
+        start: float,
+    ) -> Answer:
+        timings["total_ms"] = (time.perf_counter() - start) * 1000.0
+        return hit.model_copy(update={"cache_tier": tier, "trace_id": trace_id, "timings": timings})

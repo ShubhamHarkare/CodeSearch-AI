@@ -1,259 +1,158 @@
-<!--
-TODO(v2): rewrite after Phase 1 with numbers from eval/run_eval.py. Claims to fix:
-  - "Llama 3.1 70B": the code used llama-3.1-8b-instant (now gemma3:4b via Ollama)
-  - "1000-token chunks": the splitter used 1000 characters
-  - "500+ pages": the corpus has 220 pages
-  - "100% accuracy" / "100% code coverage" meant "no exception" / "answer has code"
-  - the query-normalization example claims punctuation removal; the code didn't do it
-  - Quick Start copies .env.example, which was empty and gitignored
-New sections for v2: architecture diagram, ablation table, groundedness and
-abstention numbers, reliability diagram, demo GIF, how to run the eval.
--->
+# CodeSearch AI
 
-# ⚛️ CodeSearch AI
+Question answering over the [React documentation](https://react.dev), with sources you can
+check and an honest "I don't know" when the docs don't cover the question. Runs fully
+locally: a local LLM through [Ollama](https://ollama.com), no API keys.
 
-> Semantic search engine for React documentation powered by RAG (Retrieval-Augmented Generation)
+Ask *"How do I update state based on the previous state?"* and you get a short answer whose
+`[n]` markers link to the exact doc sections it came from. Ask *"What's the capital of
+France?"* and it declines instead of guessing.
 
-[![Python](https://img.shields.io/badge/Python-3.11-blue)](https://www.python.org/)
-[![LangChain](https://img.shields.io/badge/LangChain-latest-green)](https://langchain.com/)
-[![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io/)
-[![Groq](https://img.shields.io/badge/Groq-Llama_3.1-orange)](https://groq.com/)
+## What it does
 
+- **Retrieval you can measure.** 4,858 section-aware chunks from react.dev, embedded with
+  `bge-small-en-v1.5`. Dense, BM25, hybrid (RRF) and cross-encoder reranking are all
+  implemented; dense won the ablation below and is the default.
+- **Abstains on off-topic questions.** A score threshold tuned on the golden set declines
+  91.7% of out-of-scope questions while wrongly declining 12.7% of real ones. No LLM call
+  is made when it abstains.
+- **Citations that point somewhere real.** Invalid `[n]` markers are stripped; every kept
+  marker maps to a react.dev URL.
+- **Follow-up questions.** "what about objects?" is rewritten into a standalone question
+  using the chat history before retrieval.
+- **Two-tier cache.** Exact matches in Redis (in-memory fallback if Redis is down) plus a
+  semantic tier for paraphrases. Keys include the index, prompt and model versions, so a
+  new build never serves stale answers.
+- **An eval gate in CI.** Every push re-runs retrieval on the golden set and fails if a
+  metric drops past its tolerance.
 
----
+## Results
 
-## 🎯 The Problem
+Retrieval ablation on 79 hand-written questions: 55 answerable from the docs and 24 that
+are not (general knowledge, other frontend frameworks, the React ecosystem).
 
-React documentation contains **500+ pages** of content. Traditional keyword search fails for semantic queries like:
-- *"How do I optimize performance?"*
-- *"What's the best way to handle forms?"*
-- *"Show me patterns for data fetching"*
+<!-- ablation:start -->
+| Config | What it does | R@1 | R@5 | MRR | nDCG@10 | Page hit@5 | Page MRR | Pool recall | OOS abstain | False abstain |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| v1 | v1-style chunking + dense top-3 (baseline) | n/a | n/a | n/a | n/a | 0.855 | 0.721 | n/a | **0.917** | 0.164 |
+| bm25 | v2 chunking + BM25 top-10 | 0.188 | 0.479 | 0.379 | 0.405 | 0.836 | 0.642 | 0.567 | n/a | n/a |
+| **dense** (default) | v2 chunking + dense top-10 | **0.345** | 0.673 | **0.574** | **0.585** | 0.982 | **0.784** | 0.752 | **0.917** | 0.127 |
+| hybrid | v2 chunking + BM25/dense fused with RRF | 0.318 | 0.612 | 0.554 | 0.553 | 0.927 | 0.746 | **0.915** | **0.917** | 0.127 |
+| dense_rerank | dense top-30 candidates + cross-encoder rerank | 0.282 | **0.685** | 0.555 | 0.566 | 0.982 | 0.747 | 0.888 | 0.875 | 0.036 |
+| hybrid_rerank | hybrid RRF candidates + cross-encoder rerank | 0.282 | 0.636 | 0.540 | 0.557 | **1.000** | 0.729 | **0.915** | 0.875 | **0.018** |
+| hybrid_rerank_bge | hybrid RRF candidates + bge-reranker-base | 0.279 | 0.615 | 0.497 | 0.527 | 0.909 | 0.680 | **0.915** | 0.875 | 0.055 |
 
-Developers waste time searching through docs manually or settling for Stack Overflow answers that might be outdated.
+55 in-scope questions + 24 out-of-scope from `eval/golden.jsonl`. Best value per column in bold. n/a = not measured, or not comparable (v1 chunks have no section anchors, so compare v1 on the page columns).
+<!-- ablation:end -->
 
----
+What the table says:
 
-## ✨ The Solution
+- **v1 → v2 chunking** is the biggest win: splitting by headings instead of every 1,000
+  characters puts the right *page* in the top 5 for 98% of questions instead of 86%.
+- **Dense beats hybrid.** BM25 alone is weak on paraphrased questions; fusing it in widens
+  the candidate pool but pushes the best match down the list.
+- **Rerankers raise R@5 but lower R@1 and MRR.** The candidate pool already contains the
+  answer ~90% of the time (pool recall), so ordering, not recall, is the bottleneck, and
+  a MS MARCO cross-encoder doesn't order React docs better than the embedder does. The
+  larger `bge-reranker-base` is worse than MiniLM on every ranking metric.
+- **But rerankers are much better at abstaining.** Cross-encoder scores separate React
+  questions from off-topic ones far more cleanly than embedding similarity: with
+  `hybrid_rerank`, only 1.8% of real questions are wrongly declined, against 12.7% with
+  dense. Dense stays the default for ranking quality; a reranker as the abstain signal is
+  the next thing to try.
 
-CodeSearch AI uses **Retrieval-Augmented Generation (RAG)** to:
-1. Understand questions in natural language
-2. Retrieve relevant sections from official React docs
-3. Generate accurate answers with working code examples
-4. Cite sources so you can dive deeper
+Metrics: section-level recall@k, MRR and nDCG@10 against the labelled section anchors;
+page-level variants for comparison with v1, whose chunks have no anchors.
 
-**Plus**: Redis caching provides **sub-3ms responses** for repeated queries.
+## Architecture
 
----
+```mermaid
+flowchart LR
+    UI[Streamlit UI] -->|HTTP| API[FastAPI]
+    API --> P[AnswerPipeline]
+    P --> C{Condense<br/>follow-up?}
+    C --> K{Exact cache}
+    K -->|miss| R[Retrieve<br/>dense / BM25 / hybrid]
+    R --> RR[Rerank / cut]
+    RR --> A{Abstain?}
+    A -->|no| S{Semantic cache}
+    S -->|miss| L[Prompt → Ollama]
+    L --> CI[Validate citations]
+    CI --> P
+    K -.->|hit| P
+    S -.->|hit| P
+    A -.->|yes| P
+    R --- IDX[(Chroma + BM25<br/>index)]
+    K --- RD[(Redis)]
+```
 
-## 🚀 Key Features
+The pipeline is assembled in `codesearch/factory.py`, the only place that chooses
+implementations; everything else receives its collaborators, so tests swap in a fake
+LLM and a hash embedder and run in seconds.
 
-- 💬 **Natural Language Queries** - Ask questions like you would a colleague
-- 💻 **100% Code Coverage** - Every answer includes working code examples
-- 📚 **Source Citations** - Direct links to official React documentation
-- ⚡ **Lightning Fast Caching** - 1049x speedup with Redis (2.94s → 0.003s)
-- 📊 **Real-Time Metrics** - Track performance and cache efficiency
-- 🎯 **High Accuracy** - 100% success rate on diverse test queries
+## Quick start
 
----
-
-## 📊 Performance Metrics
-
-Tested with **25 diverse React queries** covering beginner to advanced topics:
-
-### Response Times
-- **Average (All Queries)**: 2.35s
-- **Average (Cached)**: 0.003s ⚡
-- **Average (Uncached)**: 2.94s
-- **Cache Speedup**: **1049x faster**
-
-### Accuracy & Quality
-- **Success Rate**: 100% (25/25 queries)
-- **Code Examples**: 100% (25/25 responses)
-- **Average Sources per Query**: 2.8 relevant docs
-- **Cache Hit Rate**: 42.86% (exceeds 40% target)
-
-### Resource Efficiency
-- **Memory Usage**: 1.17 MB for 20 cached queries
-- **Latency**: Sub-3ms for cached responses
-- **Scalability**: Redis-ready for horizontal scaling
-
----
-
-## 🏗️ Architecture
-
-[![](https://mermaid.ink/img/pako:eNqVVe1uo0YUfZURq2i3Wkz5MMZG1VYJuHGksIrBtlbF-2M8XGwUYLwzsImbjdTn6L_20fZJOjCOjZM2VZGQ59y598z9OIMfFEITUFxlzfB2g2YXyxKJh9craZhzYOiqrIClmIDcbJ553O5Ma2A796cV-_HD2wm9QwlFV6jm0LxRhSv4-e1nGQRlsiyfkXuYbABd4x2wI3PoPYSQZFzuttR9UxsOztAkq1AoOB-Pzt4kliRir3XVNV23OPr-x5-fO17B3ivIOG_dPFpWWVkDqigKzy9fyVHsoptsC3lWdsqfjuO2dDQuVpAkWbluaT_SIiM9aGy9Cu6rTg6LKF4AqShDEWBGNjKNDaMF9i9aMKNbZCGfEt5NffYpbpIVZOicc0Gd71rvECqWwVdIkLepy9tuzPV1EIsXXUIJDFcZLduI6xwXGFmagRxdnnjJ6Bd0fnPViQ3HURwC39KSg5zrecnvxKTfI08IRfxEtGYE-Cst83GFUSRK7TRs4V_E7_YNaPZXmMPLFti6_l5oiPAfuin58bvnijA0w0GBDDJ19EXMIoND1D8lFTT9IvxIG8Q3QtSUFbgkgGYMk1sxRlnz99__Qk9dQLOsgINV6qiRNj_YopqIhvBWmy8zODtDv-T0ToI56vU-CIlLFHoN_Ca0-00o-cTWKFUYA2n0Jm3cfI-CFk3HEk7HLVxEEi4iCf39VRYL1NNCyOErLqtWX9pLd6GzPfnsU2sQApKGRklt0uN9hFi8qEJrx93whv6p1_wUBp22RNVO3Kq1xCTHnPuQItJ0-GOjtTTLc_dNmg5Wg5XKK0ZvwX1DRiY28R727rKk2rjW9l4lNKes8U6f8TG87rD1E7xKnQObMXIMYp6yma-xJUK7HTrbIOlgcKAz0xH0-_-DTnwm2UmtSd861prao1TX_7VWXdef0RVS5B3GkePYKT4w2qmVkP9IsMMp9PqUYdcaeqo3Ub1ADf3juLoO07G6iFQhJVWoR21mv59C16kR5lM7u_agW4aiin-mLFHcitWgKgWI-9pA5aEJWSrVBgpYKq5YJpjdLpVl-Shitrj8ldLiKYzRer1R3BTnXKB6K44FP8Piy1AcrEzcWWAerctKcUctheI-KPeKO9C1od3vm4bl6EbfMBxV2Snu0NJGAjpDwzHt4dAaPKrKb-2ZumZb-sAZWpYxtI2RPTIf_wYi30ch?type=png)](https://mermaid.live/edit#pako:eNqVVe1uo0YUfZURq2i3Wkz5MMZG1VYJuHGksIrBtlbF-2M8XGwUYLwzsImbjdTn6L_20fZJOjCOjZM2VZGQ59y598z9OIMfFEITUFxlzfB2g2YXyxKJh9craZhzYOiqrIClmIDcbJ553O5Ma2A796cV-_HD2wm9QwlFV6jm0LxRhSv4-e1nGQRlsiyfkXuYbABd4x2wI3PoPYSQZFzuttR9UxsOztAkq1AoOB-Pzt4kliRir3XVNV23OPr-x5-fO17B3ivIOG_dPFpWWVkDqigKzy9fyVHsoptsC3lWdsqfjuO2dDQuVpAkWbluaT_SIiM9aGy9Cu6rTg6LKF4AqShDEWBGNjKNDaMF9i9aMKNbZCGfEt5NffYpbpIVZOicc0Gd71rvECqWwVdIkLepy9tuzPV1EIsXXUIJDFcZLduI6xwXGFmagRxdnnjJ6Bd0fnPViQ3HURwC39KSg5zrecnvxKTfI08IRfxEtGYE-Cst83GFUSRK7TRs4V_E7_YNaPZXmMPLFti6_l5oiPAfuin58bvnijA0w0GBDDJ19EXMIoND1D8lFTT9IvxIG8Q3QtSUFbgkgGYMk1sxRlnz99__Qk9dQLOsgINV6qiRNj_YopqIhvBWmy8zODtDv-T0ToI56vU-CIlLFHoN_Ca0-00o-cTWKFUYA2n0Jm3cfI-CFk3HEk7HLVxEEi4iCf39VRYL1NNCyOErLqtWX9pLd6GzPfnsU2sQApKGRklt0uN9hFi8qEJrx93whv6p1_wUBp22RNVO3Kq1xCTHnPuQItJ0-GOjtTTLc_dNmg5Wg5XKK0ZvwX1DRiY28R727rKk2rjW9l4lNKes8U6f8TG87rD1E7xKnQObMXIMYp6yma-xJUK7HTrbIOlgcKAz0xH0-_-DTnwm2UmtSd861prao1TX_7VWXdef0RVS5B3GkePYKT4w2qmVkP9IsMMp9PqUYdcaeqo3Ub1ADf3juLoO07G6iFQhJVWoR21mv59C16kR5lM7u_agW4aiin-mLFHcitWgKgWI-9pA5aEJWSrVBgpYKq5YJpjdLpVl-Shitrj8ldLiKYzRer1R3BTnXKB6K44FP8Piy1AcrEzcWWAerctKcUctheI-KPeKO9C1od3vm4bl6EbfMBxV2Snu0NJGAjpDwzHt4dAaPKrKb-2ZumZb-sAZWpYxtI2RPTIf_wYi30ch)
----
-
-## 🛠️ Tech Stack
-
-### Backend
-- **Language**: Python 3.11
-- **Framework**: LangChain (RAG orchestration)
-- **Vector Database**: ChromaDB (semantic search)
-- **Embeddings**: Nomic-embed-text via Ollama
-- **LLM**: Llama 3.1 70B via Groq API
-- **Cache**: Redis 7 (Docker)
-
-### Why These Choices?
-
-**LangChain**: Industry-standard RAG framework with excellent documentation
-**ChromaDB**: Lightweight, embeddable vector DB perfect for demos
-**Groq**: 10x faster inference than OpenAI, generous free tier
-**Redis**: Production-grade caching used by Twitter, GitHub, Stack Overflow
-
----
-
-## 🏃‍♂️ Quick Start
-
-### Prerequisites
-- Python 3.11+
-- Docker Desktop
-- Groq API Key ([Get free key](https://console.groq.com))
-
-### Installation
+Needs Python 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com) and
+Docker (for Redis, optional).
 
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/codesearch-ai
-cd codesearch-ai
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment variables
+make setup                    # uv sync --all-extras + pre-commit
 cp .env.example .env
-# Add your GROQ_API_KEY to .env
+ollama pull gemma3:4b         # any local model works; set CODESEARCH_LLM__MODEL
+make ingest                   # fetch react.dev at a pinned commit and build the index
+docker compose up -d redis    # optional: without it the cache falls back to memory
 
-# Start Redis
-docker-compose up -d
-
-# Verify Redis connection
-python redis_cache.py
+make serve                    # API on http://localhost:8000 (docs at /docs)
+make ui                       # chat UI on http://localhost:8501
 ```
 
-### Usage
+Or from the terminal: `uv run codesearch ask "When should I use useEffect?"`
 
-```python
-from chatbot import ReactDotChatbot
-
-# Initialize bot with caching
-bot = ReactDotChatbot(use_cache=True)
-
-# Ask a question
-response = bot.ask("How do I use the useState hook?")
-
-print(response["answer"])
-print(f"Sources: {response['sources']}")
-print(f"Cached: {response['cached']}")
-print(f"Response time: {response['response_time']}s")
-```
-
----
-
-## 🧪 Testing
-
-Run the comprehensive test suite:
+## Evaluation
 
 ```bash
-# Test with cache performance tracking
-python test_queries_with_cache.py
-
-# Expected output:
-# ✅ 25/25 successful queries
-# 💾 42.86% cache hit rate
-# ⚡ 1049x speedup for cached responses
+make eval                     # the default config (dense) → results/dense.json
+make ablation                 # every config in eval/configs/, then refreshes the table above
 ```
 
----
+- `eval/golden.jsonl`: the 79 questions, each with the doc sections that answer it (or
+  marked out-of-scope by category).
+- `eval/run_eval.py`: runs one config, writes `results/<name>.json` and logs to MLflow.
+- `eval/compare.py`: compares a run against `eval/baseline.json`; the
+  [eval-gate](.github/workflows/eval-gate.yml) workflow posts the comparison on PRs and
+  fails on a regression (tolerance 0.02 for retrieval metrics, 0.05 for abstention).
 
-## 🎓 Technical Deep-Dive
+## Project layout
 
-### RAG Pipeline
-
-1. **Document Processing**
-   - Scrape 500+ pages from react.dev
-   - Chunk into 1000-token segments with 150-token overlap
-   - Preserve metadata (source URLs, headers)
-
-2. **Embedding & Indexing**
-   - Generate embeddings using Nomic-embed-text
-   - Store in ChromaDB for semantic similarity search
-   - ~3 seconds for initial query processing
-
-3. **Retrieval**
-   - Convert user query to embedding
-   - Find top 3 most relevant document chunks
-   - Average retrieval time: 0.5s
-
-4. **Generation**
-   - Pass context + query to Llama 3.1 70B
-   - Constrained to 300 words for conciseness
-   - Include code examples where relevant
-
-5. **Caching**
-   - Hash query using MD5
-   - Store response in Redis with 24h TTL
-   - 1049x speedup on cache hits
-
-### Query Normalization
-
-Improves cache hit rates by normalizing queries:
-```python
-"How do I use useState?"  → "how do i use usestate"
-"  useState hook  "       → "usestate hook"
+```
+codesearch/
+  ingest/       fetch react.dev, chunk by headings, build Chroma + BM25 + manifest
+  retrieval/    dense / BM25 / hybrid (RRF), rerankers, abstain, condense
+  generation/   versioned prompts, Ollama client, citation validation
+  cache/        keys, LRU, Redis exact cache, semantic cache, tiered cache
+  api/          FastAPI app: /v1/ask, /healthz, /readyz, /v1/index
+  ui/           Streamlit app + the HTTP client it uses
+  pipeline.py   the query path, step by step
+eval/           golden set, metrics, runner, regression gate, ablation table
+prompts/        answer.yaml, condense.yaml (versioned, fingerprinted)
+tests/          unit + integration tests (pytest; no model or network needed)
 ```
 
-Result: Similar questions hit the same cache entry.
-
----
-
-## 📊 Evaluation Methodology
-
-### Test Coverage
-- **20 unique questions** across difficulty levels
-- **5 duplicate questions** to test caching
-- Categories: Hooks, Forms, Performance, Advanced Concepts
-
-### Metrics Tracked
-- Success rate (all queries answered)
-- Response time (overall, cached, uncached)
-- Cache hit rate
-- Answer quality (code examples included)
-- Source relevance
-
----
-
-## 🚀 Deployment
-
-### Local Development
 ```bash
-docker-compose up -d
-python chatbot.py
+make test                     # the full suite
+make lint                     # ruff + ruff format + mypy --strict
 ```
 
----
+## Roadmap
 
-## 👤 Author
+- **Explainability:** a "why this answer?" panel with per-source scores, sentence-level
+  groundedness and a calibrated confidence score.
+- **Streaming** answers over SSE, incremental re-indexing when the docs change, user
+  feedback.
+- **Deployment:** Docker images, Prometheus metrics and drift monitoring.
 
-**Shubham Harkare**
-- LinkedIn: [shubham-harkare](https://www.linkedin.com/in/shubham-harkare/)
-- GitHub: [@ShubhamHarkare](https://github.com/ShubhamHarkare)
-- Portfolio: [website](https://shubham-harkare-owlgiwf.gamma.site)
+## Author
 
----
-
-
-## 📚 Resources
-
-- [LangChain Documentation](https://python.langchain.com/)
-- [ChromaDB Docs](https://docs.trychroma.com/)
-- [Groq API Reference](https://console.groq.com/docs)
-- [Redis Documentation](https://redis.io/docs/)
-
----
-
-**Built with ❤️ for the React developer community**
+**Shubham Harkare**:
+[LinkedIn](https://www.linkedin.com/in/shubham-harkare/) ·
+[GitHub](https://github.com/ShubhamHarkare)

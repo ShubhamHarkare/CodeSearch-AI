@@ -1,0 +1,47 @@
+bm25: 55 questions
+  recall_at_5        0.479
+  mrr                0.379
+  ndcg_at_10         0.405
+  page_recall_at_5   0.730
+  page_mrr           0.642
+results -> results/bm25.json
+dense: 55 questions
+  recall_at_5        0.673
+  mrr                0.574
+  ndcg_at_10         0.585
+  page_recall_at_5   0.873
+  page_mrr           0.784
+  abstain_recall     0.917
+  false_abstain_rate 0.127
+suggested abstain_threshold 0.7563 (refuses 92% of out-of-scope, 13% of in-scope)
+results -> results/dense.json
+dense_rerank: 55 questions
+  recall_at_5        0.685
+  mrr                0.555
+  ndcg_at_10         0.566
+  page_recall_at_5   0.903
+  page_mrr           0.747
+  abstain_recall     0.875
+  false_abstain_rate 0.036
+suggested abstain_threshold 2.9640 (refuses 92% of out-of-scope, 4% of in-scope)
+results -> results/dense_rerank.json
+hybrid: 55 questions
+  recall_at_5        0.612
+  mrr                0.554
+  ndcg_at_10         0.553
+  page_recall_at_5   0.818
+  page_mrr           0.746
+  abstain_recall     0.917
+  false_abstain_rate 0.127
+suggested abstain_threshold 0.7563 (refuses 92% of out-of-scope, 13% of in-scope)
+results -> results/hybrid.json
+hybrid_rerank: 55 questions
+  recall_at_5        0.636
+  mrr                0.540
+  ndcg_at_10         0.557
+  page_recall_at_5   0.900
+  page_mrr           0.729
+  abstain_recall     0.875
+  false_abstain_rate 0.018
+suggested abstain_threshold 2.9640 (refuses 92% of out-of-scope, 2% of in-scope)
+results -> results/hybrid_rerank.json

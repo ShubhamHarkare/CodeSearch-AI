@@ -9,9 +9,8 @@ Written so far (Phase 1a):
     - ``build_llm(settings)``: "ollama" -> OllamaLLM, "fake" -> FakeLLM.
     - ``build_reranker(settings)``: cross-encoder if a model is set, else no-op.
 
-Still to come:
-    - ``build_cache(settings, embedder) -> TieredCache``
-    - ``build_pipeline(settings) -> AnswerPipeline`` wiring all of the above.
+    - ``build_cache(settings, embedder)``: TieredCache, or None if disabled.
+    - ``build_pipeline(settings)``: AnswerPipeline wiring all of the above.
 
 What it must do:
     - Load heavy models once and share them (embedder used by retrieval,
@@ -24,6 +23,10 @@ Phase: 1
 """
 
 # from mlflow.tracking._model_registry.fluent import load_prompt
+from codesearch.cache.exact import RedisExactCache
+from codesearch.cache.memory import LRUCache
+from codesearch.cache.semantic import SemanticCache
+from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
 from codesearch.generation.llm import FakeLLM, OllamaLLM
 from codesearch.generation.prompts import load_prompt
@@ -71,9 +74,27 @@ def build_llm(settings: Settings) -> LLM:
     return FakeLLM()
 
 
+def build_cache(settings: Settings, embedder: Embedder) -> TieredCache | None:
+    """Redis (with an in-memory fallback) plus the semantic tier, or None if disabled."""
+    c = settings.cache
+    if not c.enabled:
+        return None
+    semantic = (
+        SemanticCache(embedder, c.semantic_threshold, c.semantic_max_entries)
+        if c.semantic_enabled
+        else None
+    )
+    return TieredCache(
+        exact=RedisExactCache(c.redis_url, c.ttl_hours),  # takes hours, not seconds
+        fallback=LRUCache(ttl_seconds=c.ttl_hours * 3600),  # first positional is max_items
+        semantic=semantic,
+    )
+
+
 def build_pipeline(settings: Settings) -> AnswerPipeline:
     handle = load_index(settings)
-    retriever = HybridRetriever(handle, build_embedder(settings), settings.retrieval)
+    embedder = build_embedder(settings)  # shared by retrieval and the semantic cache
+    retriever = HybridRetriever(handle, embedder, settings.retrieval)
 
     reranker = build_reranker(settings)
     llm = build_llm(settings)
@@ -89,4 +110,5 @@ def build_pipeline(settings: Settings) -> AnswerPipeline:
         answer_prompt=answer_prompt,
         condense_prompt=condense_prompt,
         settings=settings,
+        cache=build_cache(settings, embedder),
     )

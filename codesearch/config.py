@@ -54,6 +54,8 @@ class CacheSettings(BaseModel):
     ttl_hours: int = 24
     semantic_threshold: float = 0.95
     semantic_max_entries: int = 1000
+    enabled: bool = True
+    semantic_enabled: bool = True
 
 
 class MonitoringSettings(BaseModel):
@@ -87,6 +89,7 @@ class Settings(BaseSettings):
     cache: CacheSettings = Field(default_factory=CacheSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     admin: AdminSettings = Field(default_factory=AdminSettings)
+    image_sha: str | None = None  # set via CODESEARCH_IMAGE_SHA (Docker build)
 
     def with_overrides(self, **kwargs: Any) -> "Settings":
         """Return a new Settings instance with specified field overrides.

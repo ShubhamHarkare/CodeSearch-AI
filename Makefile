@@ -16,12 +16,17 @@ ingest:
 	uv run codesearch ingest
 
 eval:
-	uv run codesearch eval --config eval/configs/hybrid_rerank.yaml
+	uv run python -m eval.run_eval eval/configs/dense.yaml
 
+# Every config, then the README table. A failing config is reported and skipped, so one
+# bad model download doesn't stop the rest. v1.yaml needs its own index first:
+#   CODESEARCH_INDEX__CHUNK_STRATEGY=v1 CODESEARCH_INDEX__INDEX_DIR=index/v1 uv run codesearch ingest
 ablation:
-	@for config in eval/configs/*.yaml; do \
-		uv run codesearch eval --config "$$config"; \
-	done
+	@failed=""; for config in eval/configs/*.yaml; do \
+		uv run python -m eval.run_eval "$$config" || failed="$$failed $$config"; \
+	done; \
+	if [ -n "$$failed" ]; then echo "FAILED:$$failed (table uses their previous results)"; fi
+	uv run python -m eval.ablation_table --write README.md
 
 serve:
 	uv run uvicorn codesearch.api.main:create_app --factory --reload

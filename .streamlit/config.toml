@@ -1,0 +1,9 @@
+# Streamlit theme for `make ui` (read from the folder streamlit is started in).
+[theme]
+primaryColor = "#58C4DC"          # react.dev cyan
+font = "sans serif"
+baseRadius = "medium"
+
+[client]
+toolbarMode = "minimal"           # hides the Deploy button and dev menu
+showSidebarNavigation = false
