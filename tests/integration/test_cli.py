@@ -17,6 +17,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_react_dev: FakeRea
     """Point the CLI's settings at a temp folder and the fake react.dev."""
     monkeypatch.setenv("CODESEARCH_INDEX__CORPUS_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("CODESEARCH_INDEX__INDEX_DIR", str(tmp_path / "index"))
+    monkeypatch.setenv("CODESEARCH_EXPLAIN__TRACE_DB", str(tmp_path / "traces.db"))
     monkeypatch.setenv("CODESEARCH_INDEX__REACT_DEV_REPO", fake_react_dev.url)
     monkeypatch.setenv("CODESEARCH_INDEX__REACT_DEV_SHA", fake_react_dev.head)
     get_settings.cache_clear()

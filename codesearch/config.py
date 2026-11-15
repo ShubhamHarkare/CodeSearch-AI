@@ -72,6 +72,10 @@ class AdminSettings(BaseModel):
     reindex_interval_hours: int = 6
 
 
+class ExplainSettings(BaseModel):
+    trace_db: Path = Path("traces/trace.db")
+
+
 class Settings(BaseSettings):
     """Root configuration object for CodeSearch AI."""
 
@@ -90,6 +94,7 @@ class Settings(BaseSettings):
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     admin: AdminSettings = Field(default_factory=AdminSettings)
     image_sha: str | None = None  # set via CODESEARCH_IMAGE_SHA (Docker build)
+    explain: ExplainSettings = Field(default_factory=ExplainSettings)
 
     def with_overrides(self, **kwargs: Any) -> "Settings":
         """Return a new Settings instance with specified field overrides.

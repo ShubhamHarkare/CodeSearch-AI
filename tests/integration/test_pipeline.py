@@ -9,6 +9,7 @@ cases are added in later phases.
 from __future__ import annotations
 
 import dataclasses
+import sqlite3
 from typing import Any
 
 import fakeredis
@@ -19,10 +20,12 @@ from codesearch.cache.memory import LRUCache
 from codesearch.cache.semantic import SemanticCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
-from codesearch.errors import IndexNotReadyError, LLMUnavailableError
+from codesearch.errors import IndexNotReadyError, LLMUnavailableError, TraceNotFoundError
+from codesearch.explain.trace import TraceStore
 from codesearch.factory import build_cache, build_pipeline
 from codesearch.generation.llm import FakeLLM
 from codesearch.generation.prompts import load_prompt
+from codesearch.index.bm25 import tokenize
 from codesearch.index.embedder import HashEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
 from codesearch.ingest.build import build_index
@@ -56,6 +59,7 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> tuple[Settings, IndexSnap
         },
         retrieval={"mode": "dense", "dense_k": 10, "rerank_top_n": 5},
         llm={"provider": "fake"},
+        explain={"trace_db": root / "traces.db"},  # never write traces into the repo
     )
     build_index(settings, HashEmbedder())
     snapshot = IndexSnapshot.open(root / "index")
@@ -86,6 +90,7 @@ def make(
     handle: IndexHandle | None = None,
     cache: Any = None,
     answer_prompt: Any = None,
+    trace_store: Any = None,
     **retrieval: Any,
 ) -> tuple[AnswerPipeline, Any]:
     settings, snapshot = built
@@ -101,6 +106,7 @@ def make(
         condense_prompt=load_prompt("condense"),
         settings=settings,
         cache=cache,
+        trace_store=trace_store,
     )
     return pipeline, llm
 
@@ -455,3 +461,198 @@ async def test_a_cache_hit_takes_the_callers_trace_id(built: Any) -> None:
     pipeline, _ = make(built, cache=memory_cache())
     await pipeline.answer(QUESTION)
     assert (await pipeline.answer(QUESTION, trace_id="req-2")).trace_id == "req-2"
+
+
+# =====================================================================
+# Traces: every answer (fresh, abstained, refused, cached) gets one
+# =====================================================================
+
+
+async def test_an_answer_saves_a_trace_under_its_trace_id(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert trace.question == QUESTION
+    assert trace.standalone_question == QUESTION
+    assert trace.abstain_reason is None
+    assert trace.cache_tier is None
+
+
+async def test_the_trace_lists_candidates_and_the_chunks_sent_to_the_llm(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, dense_k=10, rerank_top_n=3)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert len(trace.candidates) == 10  # everything retrieval returned
+    assert len(trace.used_chunk_ids) == 3  # what the reranker kept for the prompt
+    candidate_ids = [c.chunk.id for c in trace.candidates]
+    assert set(trace.used_chunk_ids) <= set(candidate_ids)
+    assert all(c.dense_score is not None for c in trace.candidates)
+    cited = {c.chunk_id for c in answer.citations}
+    assert cited <= set(trace.used_chunk_ids)  # every citation points at a used chunk
+
+
+async def test_the_trace_records_versions_and_the_same_timings_as_the_answer(built: Any) -> None:
+    settings, snapshot = built
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert trace.versions == {
+        "index_version": snapshot.manifest.index_version,
+        "prompt_version": load_prompt("answer").version,
+        "model": settings.llm.model,
+    }
+    assert trace.timings == answer.timings
+    assert {"retrieval_ms", "generation_ms", "total_ms"} <= set(trace.timings)
+
+
+async def test_a_follow_up_trace_has_both_questions(built: Any) -> None:
+    store = TraceStore()
+    llm = FakeLLM(responses=[REWRITE, "Copy the object first [1]."])
+    pipeline, _ = make(built, llm=llm, trace_store=store)
+    answer = await pipeline.answer("what about objects?", history=HISTORY)
+    trace = store.get(answer.trace_id)
+    assert trace.question == "what about objects?"
+    assert trace.standalone_question == REWRITE
+    assert "condense_ms" in trace.timings
+
+
+async def test_an_abstained_answer_has_a_trace_saying_why(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, threshold=ALWAYS_ABSTAIN)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert trace.abstain_reason is not None
+    assert trace.abstain_reason.startswith("below_threshold")
+    assert "dense" in trace.abstain_reason  # which score was judged
+    assert trace.candidates  # you can still see what retrieval found
+    assert trace.used_chunk_ids == []  # nothing went to the LLM
+
+
+async def test_a_model_refusal_is_recorded_as_the_abstain_reason(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, llm=FakeLLM(responses=[NOT_COVERED]), trace_store=store)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is True
+    assert store.get(answer.trace_id).abstain_reason == "model_refusal"
+
+
+async def test_an_exact_cache_hit_has_its_own_trace(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, cache=memory_cache(), trace_store=store)
+    first = await pipeline.answer(QUESTION)
+    hit = await pipeline.answer(QUESTION)
+    trace = store.get(hit.trace_id)
+    assert trace.cache_tier == "exact"
+    assert trace.candidates == []  # retrieval never ran
+    assert trace.used_chunk_ids == [c.chunk_id for c in first.citations]  # from the cached answer
+    assert len(store) == 2
+
+
+async def test_a_semantic_cache_hit_trace_keeps_the_retrieval(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, cache=memory_cache(), trace_store=store)
+    await pipeline.answer(QUESTION)
+    hit = await pipeline.answer("Based on the previous state how do I update state?")
+    trace = store.get(hit.trace_id)
+    assert trace.cache_tier == "semantic"
+    assert trace.candidates  # retrieval ran before the semantic lookup
+
+
+async def test_a_failed_request_saves_no_trace(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, llm=DownLLM(), trace_store=store)
+    with pytest.raises(LLMUnavailableError):
+        await pipeline.answer(QUESTION, trace_id="failed")
+    with pytest.raises(TraceNotFoundError):
+        store.get("failed")
+
+
+class BrokenStore(TraceStore):
+    def save(self, trace: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+
+async def test_a_broken_trace_store_never_breaks_the_answer(built: Any) -> None:
+    """Explanations are secondary: losing a trace must not lose the answer."""
+    pipeline, _ = make(built, trace_store=BrokenStore())
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is False
+
+
+async def test_without_a_store_answers_still_work(built: Any) -> None:
+    pipeline, _ = make(built)
+    assert (await pipeline.answer(QUESTION)).abstained is False
+
+
+def test_build_pipeline_includes_a_trace_store(built: Any, tmp_path: Any) -> None:
+    settings, _ = built
+    settings = settings.with_overrides(explain={"trace_db": tmp_path / "t" / "traces.db"})
+    pipeline = build_pipeline(settings)
+    assert isinstance(pipeline.trace_store, TraceStore)
+    assert (tmp_path / "t" / "traces.db").exists()
+
+
+# =====================================================================
+# Matched terms: which words of the question each used source contains
+# =====================================================================
+
+
+async def test_every_used_chunk_has_its_matched_terms(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    trace = store.get((await pipeline.answer(QUESTION)).trace_id)
+    assert set(trace.matched_terms) == set(trace.used_chunk_ids)
+
+
+async def test_matched_terms_come_from_the_question_and_have_positive_weights(
+    built: Any,
+) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    trace = store.get((await pipeline.answer(QUESTION)).trace_id)
+    question_words = set(tokenize(QUESTION))
+    all_terms = [t for terms in trace.matched_terms.values() for t in terms]
+    assert all_terms, "at least one used source should share a word with the question"
+    assert set(all_terms) <= question_words
+    assert all(w > 0 for terms in trace.matched_terms.values() for w in terms.values())
+
+
+async def test_matched_terms_use_the_condensed_question(built: Any) -> None:
+    """The follow-up "what about objects?" was searched as the rewrite, so the
+    matched words must come from the rewrite."""
+    store = TraceStore()
+    llm = FakeLLM(responses=[REWRITE, "Copy the object first [1]."])
+    pipeline, _ = make(built, llm=llm, trace_store=store)
+    trace = store.get((await pipeline.answer("what about objects?", history=HISTORY)).trace_id)
+    all_terms = {t for terms in trace.matched_terms.values() for t in terms}
+    assert all_terms <= set(tokenize(REWRITE))
+
+
+async def test_matched_terms_add_up_to_the_bm25_score(built: Any) -> None:
+    """In hybrid mode, a chunk that BM25 retrieved has a bm25_score; its matched-term
+    contributions must add up to exactly that score."""
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, mode="hybrid", bm25_k=10, dense_k=10)
+    trace = store.get((await pipeline.answer(QUESTION)).trace_id)
+    by_id = {c.chunk.id: c for c in trace.candidates}
+    checked = 0
+    for chunk_id, terms in trace.matched_terms.items():
+        bm25_score = by_id[chunk_id].bm25_score
+        if bm25_score is not None:
+            assert sum(terms.values()) == pytest.approx(bm25_score)
+            checked += 1
+    assert checked, "at least one used chunk should have come from BM25"
+
+
+async def test_abstains_and_cache_hits_have_no_matched_terms(built: Any) -> None:
+    store = TraceStore()
+    abstaining, _ = make(built, trace_store=store, threshold=ALWAYS_ABSTAIN)
+    assert store.get((await abstaining.answer(QUESTION)).trace_id).matched_terms == {}
+
+    cached, _ = make(built, trace_store=store, cache=memory_cache())
+    await cached.answer(QUESTION)
+    hit = await cached.answer(QUESTION)
+    assert store.get(hit.trace_id).matched_terms == {}
