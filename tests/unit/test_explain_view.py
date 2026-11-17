@@ -12,7 +12,14 @@ from typing import Any
 
 import pytest
 
-from codesearch.ui.explain_view import format_matched, format_ms, source_rows, summary_lines
+from codesearch.ui.explain_view import (
+    format_matched,
+    format_ms,
+    grounding_note,
+    sentence_rows,
+    source_rows,
+    summary_lines,
+)
 
 
 def candidate(chunk_id: str, title: str = "", **scores: float | None) -> dict[str, Any]:
@@ -183,3 +190,60 @@ def test_explain_view_does_not_import_streamlit_or_the_pipeline() -> None:
         a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names
     }
     assert not any(name.split(".")[0] in {"streamlit", "codesearch"} for name in names)
+
+
+# =====================================================================
+# sentence_rows / grounding_note: groundedness, made visible
+# =====================================================================
+
+
+def sentence(text: str, label: str, score: float, *ids: str) -> dict[str, Any]:
+    return {"sentence": text, "cited_chunk_ids": list(ids), "label": label, "score": score}
+
+
+def test_sentence_rows_label_each_sentence_and_name_its_sources() -> None:
+    t = trace(
+        used_chunk_ids=["c", "a"],
+        sentences=[
+            sentence("Use an updater [1].", "supported", 0.912, "c"),
+            sentence("It runs later [2].", "partial", 0.55, "a"),
+            sentence("React is the best.", "unsupported", 0.0),
+        ],
+    )
+    assert sentence_rows(t) == [
+        {"label": "supported", "score": 0.91, "sentence": "Use an updater [1].", "sources": "[1]"},
+        {"label": "partial", "score": 0.55, "sentence": "It runs later [2].", "sources": "[2]"},
+        {"label": "unsupported", "score": 0.0, "sentence": "React is the best.", "sources": ""},
+    ]
+
+
+def test_sentence_rows_number_sources_like_the_citations() -> None:
+    """A sentence citing two chunks shows both citation numbers, in prompt order."""
+    t = trace(
+        used_chunk_ids=["x", "y", "z"],
+        sentences=[sentence("Both [1, 3].", "supported", 0.8, "z", "x")],
+    )
+    assert sentence_rows(t)[0]["sources"] == "[1, 3]"
+
+
+def test_sentence_rows_without_sentences() -> None:
+    assert sentence_rows(trace()) == []
+
+
+@pytest.mark.parametrize(
+    ("labels", "note"),
+    [
+        (["supported", "supported"], ""),
+        (["supported", "unsupported"], "1 of 2 sentences isn't supported by its source"),
+        (
+            ["unsupported", "partial", "unsupported"],
+            "2 of 3 sentences aren't supported by their sources",
+        ),
+        (["supported", "partial"], "1 of 2 sentences is only partly supported"),
+        ([], ""),
+    ],
+)
+def test_grounding_note_flags_weak_sentences(labels: list[str], note: str) -> None:
+    """Shown under the answer: unsupported sentences are the warning that matters most."""
+    t = trace(sentences=[sentence(f"S{i}.", label, 0.5) for i, label in enumerate(labels)])
+    assert grounding_note(t) == note

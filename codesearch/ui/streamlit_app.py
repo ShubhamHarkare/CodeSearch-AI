@@ -26,7 +26,7 @@ from typing import Any, Literal
 import streamlit as st
 
 from codesearch.ui.api_client import ApiClient, ApiError
-from codesearch.ui.explain_view import source_rows, summary_lines
+from codesearch.ui.explain_view import grounding_note, sentence_rows, source_rows, summary_lines
 
 API_URL = os.environ.get("CODESEARCH_API_URL", "http://localhost:8000")
 HISTORY_TURNS = 10  # the API accepts at most 10 history messages
@@ -44,6 +44,7 @@ SCORE_COLUMNS = {
     "rrf": ("RRF", "{:.4f}"),
     "rerank": ("Rerank", "{:.2f}"),
 }
+LABEL_COLORS = {"supported": "green", "partial": "orange", "unsupported": "red"}
 AVATARS = {"user": ":material/person:", "assistant": ":material/menu_book:"}
 
 
@@ -97,6 +98,7 @@ def handle_question(question: str) -> None:
             "cache_tier": result.get("cache_tier"),
             "total_ms": result.get("timings", {}).get("total_ms"),
             "trace_id": result.get("trace_id"),
+            "groundedness": result.get("groundedness"),
         }
     )
 
@@ -122,12 +124,19 @@ def render_message(msg: dict[str, Any]) -> None:
             meta.append("Not covered in the React docs")
         if msg.get("cache_tier"):
             meta.append(f"cached ({msg['cache_tier']})")
+        if msg.get("groundedness") is not None:
+            meta.append(f"grounded {msg['groundedness']:.0%}")
         if msg.get("total_ms") is not None:
             meta.append(f"{msg['total_ms'] / 1000:.1f}s")
         if meta:
             st.caption(" · ".join(meta))
 
         if msg.get("trace_id"):
+            trace = fetch_trace(msg["trace_id"])
+            # The visible flag: claims a reader should double-check, outside the expander.
+            note = grounding_note(trace) if trace else ""
+            if note:
+                st.caption(f":orange[:material/warning: {note}. See *Why this answer?*]")
             render_explanation(msg["trace_id"])
 
 
@@ -140,6 +149,17 @@ def render_explanation(trace_id: str) -> None:
             return
         for line in summary_lines(trace):
             st.caption(line)
+        sentences = sentence_rows(trace)
+        if sentences:
+            st.markdown("**Sentence check**")
+            for row in sentences:
+                color = LABEL_COLORS[row["label"]]
+                cites = f" · cites {row['sources']}" if row["sources"] else " · no citation"
+                st.markdown(
+                    f":{color}-badge[{row['label']} {row['score']:.2f}] {row['sentence']}"
+                    f" :gray[{cites}]"
+                )
+            st.markdown("**Sources**")
         rows = source_rows(trace)
         if not rows:
             return
@@ -159,7 +179,7 @@ def render_explanation(trace_id: str) -> None:
         st.dataframe(
             table,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             column_order=["n", "title", "url", "matched", *scores],
             column_config={
                 "n": st.column_config.TextColumn("", width=36),
@@ -192,7 +212,7 @@ def render_sidebar() -> None:
             f"prompt v{versions.get('prompt_version', '?')} · "
             f"cache {components.get('cache', 'n/a')}"
         )
-        if st.button("New chat", icon=":material/add:", use_container_width=True):
+        if st.button("New chat", icon=":material/add:", width="stretch"):
             st.session_state.messages = []
             st.rerun()
 

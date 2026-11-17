@@ -116,3 +116,40 @@ def summary_lines(trace: dict[str, Any]) -> list[str]:
         lines.append(" · ".join(timing_parts))
 
     return lines
+
+
+def sentence_rows(trace: dict[str, Any]) -> list[dict[str, Any]]:
+    """One row per graded sentence: label, score, text, and the [n] it cites."""
+    used = list(trace.get("used_chunk_ids", []))
+    rows: list[dict[str, Any]] = []
+    for s in trace.get("sentences", []):
+        numbers = sorted(used.index(cid) + 1 for cid in s["cited_chunk_ids"] if cid in used)
+        rows.append(
+            {
+                "label": s["label"],
+                "score": round(s["score"], 2),
+                "sentence": s["sentence"],
+                "sources": f"[{', '.join(str(n) for n in numbers)}]" if numbers else "",
+            }
+        )
+    return rows
+
+
+def grounding_note(trace: dict[str, Any]) -> str:
+    """A one-line warning when sentences lack support; "" when all are supported.
+
+    Unsupported sentences outrank partial ones: they are the claims a reader
+    should double-check.
+    """
+    labels = [s["label"] for s in trace.get("sentences", [])]
+    total = len(labels)
+    unsupported = labels.count("unsupported")
+    partial = labels.count("partial")
+    if unsupported:
+        if unsupported == 1:
+            return f"1 of {total} sentences isn't supported by its source"
+        return f"{unsupported} of {total} sentences aren't supported by their sources"
+    if partial:
+        verb = "is" if partial == 1 else "are"
+        return f"{partial} of {total} sentences {verb} only partly supported"
+    return ""
