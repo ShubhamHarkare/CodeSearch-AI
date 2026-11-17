@@ -33,11 +33,12 @@ from typing import TYPE_CHECKING, Literal
 
 from codesearch.cache.keys import make_key
 from codesearch.config import Settings
+from codesearch.explain.groundedness import assess
 from codesearch.explain.trace import TraceBuilder, TraceStore
 from codesearch.generation.citations import strip_invalid, to_citations
 from codesearch.generation.prompts import PromptTemplate, format_context
 from codesearch.index.handle import IndexHandle
-from codesearch.interfaces import LLM, Reranker, Retriever
+from codesearch.interfaces import LLM, EntailmentScorer, Reranker, Retriever
 from codesearch.log import get_logger, new_trace_id
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE, decide
 from codesearch.retrieval.condense import condense
@@ -62,6 +63,7 @@ class AnswerPipeline:
         settings: Settings,
         cache: "TieredCache | None" = None,
         trace_store: TraceStore | None = None,
+        grounder: EntailmentScorer | None = None,
     ) -> None:
         self.handle = handle
         self.retriver = retriever
@@ -72,6 +74,7 @@ class AnswerPipeline:
         self.settings = settings
         self.cache = cache
         self.trace_store = trace_store
+        self.grounder = grounder
 
     async def answer(
         self,
@@ -185,9 +188,31 @@ class AnswerPipeline:
             citations = []
             trace.set_abstain("model_refusal")
 
+        groundedness: float | None = None
+        if self.grounder is not None and not abstained:
+            explain = self.settings.explain
+            try:
+                with trace.time("groundedness"):
+                    sentences, groundedness = assess(
+                        text,
+                        citations,
+                        chunks,
+                        self.grounder,
+                        supported_at=explain.supported_threshold,
+                        partial_at=explain.partial_threshold,
+                    )
+                trace.set_sentences(sentences)
+            except Exception as e:
+                log.warning("groundedness.failed", trace_id=trace.trace_id, error=str(e))
+
         # Step 11: Return completed Answer with total timing
         answer = self._finish(
-            trace, pipeline_start, text=text, citations=citations, abstained=abstained
+            trace,
+            pipeline_start,
+            text=text,
+            citations=citations,
+            abstained=abstained,
+            groundedness=groundedness,
         )
         if self.cache is not None and not abstained:  # unchanged
             self.cache.set(key, answer)
@@ -202,6 +227,7 @@ class AnswerPipeline:
         text: str,
         citations: list[Citation],
         abstained: bool,
+        groundedness: float | None = None,
     ) -> Answer:
         """A fresh answer (or an abstain): build it, save its trace, return it."""
         trace.timings["total_ms"] = (time.perf_counter() - start) * 1000.0
@@ -213,6 +239,7 @@ class AnswerPipeline:
             trace_id=trace.trace_id,
             index_version=self.handle.version,
             prompt_version=self.answer_prompt.version,
+            groundedness=groundedness,
         )
         self._save(trace)
         return answer

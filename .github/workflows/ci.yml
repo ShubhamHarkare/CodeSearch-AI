@@ -34,4 +34,4 @@ jobs:
         run: uv run mypy
 
       - name: Run Pytest with coverage
-        run: uv run pytest -m "not needs_llm and not slow" --cov=codesearch
+        run: uv run pytest -m "not needs_llm and not needs_model and not slow" --cov=codesearch

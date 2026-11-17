@@ -21,6 +21,7 @@ from codesearch.cache.semantic import SemanticCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
 from codesearch.errors import IndexNotReadyError, LLMUnavailableError, TraceNotFoundError
+from codesearch.explain.groundedness import NLIScorer
 from codesearch.explain.trace import TraceStore
 from codesearch.factory import build_cache, build_pipeline
 from codesearch.generation.llm import FakeLLM
@@ -59,7 +60,8 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> tuple[Settings, IndexSnap
         },
         retrieval={"mode": "dense", "dense_k": 10, "rerank_top_n": 5},
         llm={"provider": "fake"},
-        explain={"trace_db": root / "traces.db"},  # never write traces into the repo
+        # never write traces into the repo; never download the NLI model in tests
+        explain={"trace_db": root / "traces.db", "groundedness": False},
     )
     build_index(settings, HashEmbedder())
     snapshot = IndexSnapshot.open(root / "index")
@@ -91,10 +93,14 @@ def make(
     cache: Any = None,
     answer_prompt: Any = None,
     trace_store: Any = None,
+    grounder: Any = None,
+    explain: dict[str, Any] | None = None,
     **retrieval: Any,
 ) -> tuple[AnswerPipeline, Any]:
     settings, snapshot = built
-    settings = settings.with_overrides(retrieval={"abstain_threshold": threshold, **retrieval})
+    settings = settings.with_overrides(
+        retrieval={"abstain_threshold": threshold, **retrieval}, explain=explain or {}
+    )
     handle = handle if handle is not None else IndexHandle(snapshot)
     llm = llm if llm is not None else FakeLLM()
     pipeline = AnswerPipeline(
@@ -107,6 +113,7 @@ def make(
         settings=settings,
         cache=cache,
         trace_store=trace_store,
+        grounder=grounder,
     )
     return pipeline, llm
 
@@ -656,3 +663,132 @@ async def test_abstains_and_cache_hits_have_no_matched_terms(built: Any) -> None
     await cached.answer(QUESTION)
     hit = await cached.answer(QUESTION)
     assert store.get(hit.trace_id).matched_terms == {}
+
+
+# =====================================================================
+# Groundedness: each cited sentence checked against its chunk
+# =====================================================================
+
+
+class FakeGrounder:
+    """Entailment from a rule on (premise, hypothesis); records every batch."""
+
+    def __init__(self, rule: Any = 0.9) -> None:
+        self.rule = rule
+        self.calls: list[list[tuple[str, str]]] = []
+
+    def entailment(self, pairs: Any) -> list[float]:
+        self.calls.append(list(pairs))
+        if callable(self.rule):
+            return [self.rule(p, h) for p, h in pairs]
+        return [float(self.rule)] * len(pairs)
+
+
+class ExplodingGrounder(FakeGrounder):
+    def entailment(self, pairs: Any) -> list[float]:
+        raise RuntimeError("NLI model failed to load")
+
+
+# FakeLLM's default answer: two sentences citing [1] and [2].
+DEFAULT_SENTENCES = FakeLLM.DEFAULT_ANSWER.count(".")
+
+
+async def test_a_grounded_answer_gets_a_score_and_sentence_labels(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=FakeGrounder(0.9))
+    answer = await pipeline.answer(QUESTION)
+    assert answer.groundedness == 1.0
+    trace = store.get(answer.trace_id)
+    assert len(trace.sentences) == DEFAULT_SENTENCES
+    assert all(s.label == "supported" for s in trace.sentences)
+    assert "groundedness_ms" in answer.timings
+
+
+async def test_an_ungrounded_answer_scores_zero(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=FakeGrounder(0.1))
+    answer = await pipeline.answer(QUESTION)
+    assert answer.groundedness == 0.0
+    assert all(s.label == "unsupported" for s in store.get(answer.trace_id).sentences)
+
+
+async def test_each_sentence_is_checked_against_the_chunk_it_cites(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=grounder)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    texts = {c.chunk.id: c.chunk.text for c in trace.candidates}
+    cited = {c.number: c.chunk_id for c in answer.citations}
+    premises = [premise for premise, _ in grounder.calls[0]]
+    assert premises == [texts[cited[1]], texts[cited[2]]]
+
+
+async def test_thresholds_come_from_settings(built: Any) -> None:
+    store = TraceStore()
+    loose, _ = make(
+        built,
+        trace_store=store,
+        grounder=FakeGrounder(0.5),
+        explain={"supported_threshold": 0.45, "partial_threshold": 0.2},
+    )
+    answer = await loose.answer(QUESTION)
+    assert answer.groundedness == 1.0
+    assert {s.label for s in store.get(answer.trace_id).sentences} == {"supported"}
+
+    strict, _ = make(built, trace_store=store, grounder=FakeGrounder(0.5))
+    answer = await strict.answer(QUESTION)
+    assert {s.label for s in store.get(answer.trace_id).sentences} == {"partial"}
+
+
+async def test_abstained_answers_are_not_graded(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(built, grounder=grounder, threshold=ALWAYS_ABSTAIN)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.groundedness is None
+    assert grounder.calls == []
+
+
+async def test_a_model_refusal_is_not_graded(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(built, llm=FakeLLM(responses=[NOT_COVERED]), grounder=grounder)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is True
+    assert answer.groundedness is None
+    assert grounder.calls == []
+
+
+async def test_a_failing_grounder_never_breaks_the_answer(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=ExplodingGrounder())
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is False
+    assert answer.groundedness is None
+    assert store.get(answer.trace_id).sentences == []
+
+
+async def test_without_a_grounder_groundedness_is_none(built: Any) -> None:
+    pipeline, _ = make(built)
+    assert (await pipeline.answer(QUESTION)).groundedness is None
+
+
+async def test_a_cache_hit_keeps_the_original_groundedness(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(built, cache=memory_cache(), grounder=grounder)
+    await pipeline.answer(QUESTION)
+    hit = await pipeline.answer(QUESTION)
+    assert hit.cache_tier == "exact"
+    assert hit.groundedness == 1.0
+    assert len(grounder.calls) == 1  # graded once, when it was generated
+
+
+def test_build_pipeline_adds_the_nli_grounder_when_enabled(built: Any) -> None:
+    settings, _ = built
+    pipeline = build_pipeline(settings.with_overrides(explain={"groundedness": True}))
+    assert isinstance(pipeline.grounder, NLIScorer)
+    assert pipeline.grounder.model_name == settings.explain.nli_model
+
+
+def test_build_pipeline_without_groundedness(built: Any) -> None:
+    settings, _ = built
+    assert build_pipeline(settings).grounder is None  # the fixture turns it off

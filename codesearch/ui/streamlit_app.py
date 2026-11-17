@@ -26,6 +26,7 @@ from typing import Any, Literal
 import streamlit as st
 
 from codesearch.ui.api_client import ApiClient, ApiError
+from codesearch.ui.explain_view import source_rows, summary_lines
 
 API_URL = os.environ.get("CODESEARCH_API_URL", "http://localhost:8000")
 HISTORY_TURNS = 10  # the API accepts at most 10 history messages
@@ -36,6 +37,13 @@ EXAMPLES = [
 ]
 BadgeColor = Literal["green", "orange", "red"]
 STATUS_COLORS: dict[str, BadgeColor] = {"ok": "green", "degraded": "orange"}
+# key in source_rows -> (column label, number format)
+SCORE_COLUMNS = {
+    "dense": ("Dense", "{:.3f}"),
+    "bm25": ("BM25", "{:.2f}"),
+    "rrf": ("RRF", "{:.4f}"),
+    "rerank": ("Rerank", "{:.2f}"),
+}
 AVATARS = {"user": ":material/person:", "assistant": ":material/menu_book:"}
 
 
@@ -52,6 +60,15 @@ def fetch_status() -> dict[str, Any]:
         return get_client().ready()
     except ApiError as e:
         return {"status": "offline", "error": str(e)}
+
+
+@st.cache_data(show_spinner=False, max_entries=200)
+def fetch_trace(trace_id: str) -> dict[str, Any] | None:
+    """A trace never changes once saved, so fetch it once and keep it."""
+    try:
+        return get_client().explain(trace_id)
+    except ApiError:
+        return None  # API restarted with an empty store, or the trace was lost
 
 
 def handle_question(question: str) -> None:
@@ -79,6 +96,7 @@ def handle_question(question: str) -> None:
             "abstained": result.get("abstained", False),
             "cache_tier": result.get("cache_tier"),
             "total_ms": result.get("timings", {}).get("total_ms"),
+            "trace_id": result.get("trace_id"),
         }
     )
 
@@ -108,6 +126,54 @@ def render_message(msg: dict[str, Any]) -> None:
             meta.append(f"{msg['total_ms'] / 1000:.1f}s")
         if meta:
             st.caption(" · ".join(meta))
+
+        if msg.get("trace_id"):
+            render_explanation(msg["trace_id"])
+
+
+def render_explanation(trace_id: str) -> None:
+    """The "Why this answer?" panel: what was searched, why, and every source's scores."""
+    with st.expander("Why this answer?", icon=":material/manage_search:"):
+        trace = fetch_trace(trace_id)
+        if trace is None:
+            st.caption("Explanation unavailable.")
+            return
+        for line in summary_lines(trace):
+            st.caption(line)
+        rows = source_rows(trace)
+        if not rows:
+            return
+        # Show only the score columns this retrieval mode filled (dense mode has no RRF...).
+        scores = [k for k in SCORE_COLUMNS if any(r[k] is not None for r in rows)]
+        # Scores as text: a missing score shows as a blank cell, not "None".
+        table = [
+            {
+                "n": f"[{r['n']}]" if r["n"] else "",
+                "title": r["title"],
+                "url": r["url"],
+                "matched": r["matched"],
+                **{k: "" if r[k] is None else SCORE_COLUMNS[k][1].format(r[k]) for k in scores},
+            }
+            for r in rows
+        ]
+        st.dataframe(
+            table,
+            hide_index=True,
+            use_container_width=True,
+            column_order=["n", "title", "url", "matched", *scores],
+            column_config={
+                "n": st.column_config.TextColumn("", width=36),
+                "title": st.column_config.TextColumn("Source", width=190),
+                "url": st.column_config.LinkColumn("", display_text="open", width=44),
+                "matched": st.column_config.TextColumn(
+                    "Matched words", width=170, help="Question words in this source, by BM25 weight"
+                ),
+                **{k: st.column_config.TextColumn(SCORE_COLUMNS[k][0], width=58) for k in scores},
+            },
+        )
+        st.caption(
+            "[n] = the citation number in the answer. Rows without one weren't sent to the model."
+        )
 
 
 def render_sidebar() -> None:

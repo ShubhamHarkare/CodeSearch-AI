@@ -1,6 +1,6 @@
 """Contracts (typing.Protocol) that swappable parts must satisfy."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -75,3 +75,10 @@ class Retriever(Protocol):
     def retrieve(self, query: str) -> list[ScoredChunk]:
         """Retrieve relevant scored candidate chunks for a given query."""
         ...
+
+
+@runtime_checkable
+class EntailmentScorer(Protocol):
+    """Scores how strongly each premise (a chunk) entails its hypothesis (a sentence)."""
+
+    def entailment(self, pairs: Sequence[tuple[str, str]]) -> list[float]: ...

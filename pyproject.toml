@@ -106,4 +106,5 @@ addopts = "-ra --strict-markers"
 markers = [
     "slow: marks tests as slow",
     "needs_llm: marks tests that require active LLM API credentials",
+    "needs_model: downloads a Hugging Face model (skipped in CI with -m \"not needs_model\")",
 ]

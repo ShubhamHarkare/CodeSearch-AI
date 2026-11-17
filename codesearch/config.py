@@ -74,6 +74,10 @@ class AdminSettings(BaseModel):
 
 class ExplainSettings(BaseModel):
     trace_db: Path = Path("traces/trace.db")
+    groundedness: bool = True
+    supported_threshold: float = 0.7
+    nli_model: str = "cross-encoder/nli-deberta-v3-small"
+    partial_threshold: float = 0.4
 
 
 class Settings(BaseSettings):

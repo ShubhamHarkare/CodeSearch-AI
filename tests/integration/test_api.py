@@ -58,7 +58,7 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> tuple[Settings, IndexSnap
         retrieval={"mode": "dense", "dense_k": 10, "rerank_top_n": 5},
         llm={"provider": "fake"},
         cache={"enabled": False},
-        explain={"trace_db": root / "traces.db"},
+        explain={"trace_db": root / "traces.db", "groundedness": False},  # no NLI download
         image_sha="abc1234",
     )
     build_index(settings, HashEmbedder())

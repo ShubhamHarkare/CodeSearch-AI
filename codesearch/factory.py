@@ -28,6 +28,7 @@ from codesearch.cache.memory import LRUCache
 from codesearch.cache.semantic import SemanticCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
+from codesearch.explain.groundedness import NLIScorer
 from codesearch.explain.trace import TraceStore
 from codesearch.generation.llm import FakeLLM, OllamaLLM
 from codesearch.generation.prompts import load_prompt
@@ -113,4 +114,5 @@ def build_pipeline(settings: Settings) -> AnswerPipeline:
         settings=settings,
         cache=build_cache(settings, embedder),
         trace_store=TraceStore(settings.explain.trace_db),
+        grounder=NLIScorer(settings.explain.nli_model) if settings.explain.groundedness else None,
     )
