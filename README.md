@@ -10,8 +10,6 @@ Ask *"How do I update state based on the previous state?"* and you get a short a
 `[n]` markers link to the doc sections it came from. Ask *"What's the capital of France?"*
 and it declines without calling the model.
 
-<!-- TODO: demo GIF (docs/demo.gif) -->
-
 ## What it does
 
 - **Retrieves from 4,858 heading-aware chunks** of react.dev, embedded with
