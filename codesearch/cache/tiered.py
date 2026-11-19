@@ -49,7 +49,8 @@ class TieredCache:
     def degraded(self) -> bool:
         return self._retry_at is not None
 
-    def _user_redis(self) -> bool:
+    def _use_redis(self) -> bool:
+        """True unless Redis failed recently and the retry window is still open."""
         return self._retry_at is None or self.clock() >= self._retry_at
 
     def _mark_failed(self) -> None:
@@ -57,7 +58,7 @@ class TieredCache:
         self._retry_at = self.clock() + self.retry_after_s
 
     def get(self, key: str) -> Answer | None:
-        if self._user_redis():
+        if self._use_redis():
             try:
                 answer = self.exact.get(key)
                 self._retry_at = None
@@ -72,7 +73,7 @@ class TieredCache:
         return answer
 
     def set(self, key: str, answer: Answer) -> None:
-        if self._user_redis():
+        if self._use_redis():
             try:
                 self.exact.set(key, answer)
             except CacheUnavailableError:
@@ -84,8 +85,6 @@ class TieredCache:
     def lookup_similar(self, query: str, **kwargs: Any) -> Answer | None:
         answer = self.semantic.lookup(query, **kwargs) if self.semantic is not None else None
         self._counts["semantic_hits" if answer is not None else "misses"] += 1
-        return answer
-
         return answer
 
     def add_similar(self, query: str, answer: Answer, **kwargs: Any) -> None:
