@@ -26,7 +26,13 @@ from typing import Any, Literal
 import streamlit as st
 
 from codesearch.ui.api_client import ApiClient, ApiError
-from codesearch.ui.explain_view import grounding_note, sentence_rows, source_rows, summary_lines
+from codesearch.ui.explain_view import (
+    confidence_badge,
+    grounding_note,
+    sentence_rows,
+    source_rows,
+    summary_lines,
+)
 
 API_URL = os.environ.get("CODESEARCH_API_URL", "http://localhost:8000")
 HISTORY_TURNS = 10  # the API accepts at most 10 history messages
@@ -99,6 +105,7 @@ def handle_question(question: str) -> None:
             "total_ms": result.get("timings", {}).get("total_ms"),
             "trace_id": result.get("trace_id"),
             "groundedness": result.get("groundedness"),
+            "confidence": result.get("confidence"),
         }
     )
 
@@ -118,6 +125,15 @@ def render_message(msg: dict[str, Any]) -> None:
         )
         if sources:
             st.caption(f"Sources: {sources}")
+
+        badge = confidence_badge(msg.get("confidence"))
+        if badge is not None:
+            _, color, text = badge
+            st.markdown(
+                f":{color}-badge[{text}]",
+                help="Calibrated on the golden set: how often answers like this one "
+                "were actually right.",
+            )
 
         meta = []
         if msg.get("abstained"):

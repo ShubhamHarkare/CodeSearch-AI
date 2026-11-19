@@ -72,22 +72,27 @@ def run(answers: Path, out: Path, *, n_bins: int = 5, folds: int = 5) -> dict[st
 def main(
     answers: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     out: Annotated[Path, typer.Option(help="Where to save the calibrator.")] = DEFAULT_OUT,
+    report: Annotated[
+        Path, typer.Option(help="Where to save the calibration report (for the README plot).")
+    ] = Path("results/calibration.json"),
     n_bins: Annotated[int, typer.Option(help="Reliability bins (small data: keep it small).")] = 5,
 ) -> None:
     """Fit the calibrator and print how well calibrated it is."""
-    report = run(answers, out, n_bins=n_bins)
+    result = run(answers, out, n_bins=n_bins)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(json.dumps(result, indent=2))
     typer.echo(
-        f"fitted on {report['n']} answers ({report['positive_rate']:.0%} good), "
-        f"{report['folds']}-fold out-of-fold check"
+        f"fitted on {result['n']} answers ({result['positive_rate']:.0%} good), "
+        f"{result['folds']}-fold out-of-fold check"
     )
-    typer.echo(f"ECE {report['ece']:.3f}   (0 = perfectly calibrated)")
+    typer.echo(f"ECE {result['ece']:.3f}   (0 = perfectly calibrated)")
     typer.echo("  bin         n   confidence  accuracy")
-    for b in report["bins"]:
+    for b in result["bins"]:
         typer.echo(
             f"  {b['lower']:.1f}-{b['upper']:.1f}  {b['count']:>3}   "
             f"{b['confidence']:.2f}        {b['accuracy']:.2f}"
         )
-    typer.echo(f"saved -> {out}")
+    typer.echo(f"saved -> {out}  (report -> {report})")
 
 
 if __name__ == "__main__":

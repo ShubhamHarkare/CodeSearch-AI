@@ -153,3 +153,18 @@ def grounding_note(trace: dict[str, Any]) -> str:
         verb = "is" if partial == 1 else "are"
         return f"{partial} of {total} sentences {verb} only partly supported"
     return ""
+
+
+# Same thresholds as Calibrator.level's defaults (a test keeps them in sync). Kept here,
+# not imported, because the UI must not import codesearch internals.
+HIGH_AT = 0.75
+LOW_AT = 0.4
+_BADGE_COLORS = {"high": "green", "medium": "orange", "low": "red"}
+
+
+def confidence_badge(confidence: float | None) -> tuple[str, str, str] | None:
+    """(level, color, text) for the answer's calibrated confidence; None when there is none."""
+    if confidence is None:
+        return None
+    level = "high" if confidence >= HIGH_AT else "medium" if confidence >= LOW_AT else "low"
+    return level, _BADGE_COLORS[level], f"{level} confidence {confidence:.0%}"

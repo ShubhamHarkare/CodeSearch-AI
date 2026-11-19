@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from codesearch.ui.explain_view import (
+    confidence_badge,
     format_matched,
     format_ms,
     grounding_note,
@@ -247,3 +248,37 @@ def test_grounding_note_flags_weak_sentences(labels: list[str], note: str) -> No
     """Shown under the answer: unsupported sentences are the warning that matters most."""
     t = trace(sentences=[sentence(f"S{i}.", label, 0.5) for i, label in enumerate(labels)])
     assert grounding_note(t) == note
+
+
+# =====================================================================
+# confidence_badge: the calibrated confidence, as a high/medium/low badge
+# =====================================================================
+
+
+@pytest.mark.parametrize(
+    ("confidence", "badge"),
+    [
+        (0.91, ("high", "green", "high confidence 91%")),
+        (0.75, ("high", "green", "high confidence 75%")),
+        (0.74, ("medium", "orange", "medium confidence 74%")),
+        (0.40, ("medium", "orange", "medium confidence 40%")),
+        (0.12, ("low", "red", "low confidence 12%")),
+    ],
+)
+def test_confidence_badge_levels(confidence: float, badge: tuple[str, str, str]) -> None:
+    """Same thresholds as Calibrator.level (0.75 / 0.4), so UI and API agree."""
+    assert confidence_badge(confidence) == badge
+
+
+def test_no_confidence_no_badge() -> None:
+    """No calibrator fitted yet, or an abstained answer."""
+    assert confidence_badge(None) is None
+
+
+def test_badge_thresholds_match_the_calibrator_defaults() -> None:
+    from codesearch.explain.calibration import Calibrator
+
+    cal = Calibrator(coef=[0.0, 0.0, 0.0], intercept=0.0)
+    for c in (0.0, 0.39, 0.4, 0.6, 0.749, 0.75, 1.0):
+        badge = confidence_badge(c)
+        assert badge is not None and badge[0] == cal.level(c)
