@@ -24,7 +24,7 @@ from codesearch.schemas import Chunk, ScoredChunk
 # When you change a prompt's text: bump its `version` in the YAML file, run the
 # tests, and copy the new fingerprint from the failure message into this table.
 KNOWN_PROMPTS = {
-    "answer": ("2", "f41464b82f66"),  # v2: one citation per claim, code for "how do I", 150 words
+    "answer": ("3", "d291349b0666"),  # v3: refined v2 wording
     "condense": ("1", "d6e2353dacbd"),
 }
 

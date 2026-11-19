@@ -1,4 +1,4 @@
-version: "2"
+version: "3"
 
 system: |
   You are CodeSearch, an assistant that answers questions about React using ONLY

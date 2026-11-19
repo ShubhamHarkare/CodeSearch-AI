@@ -81,6 +81,8 @@ class ExplainSettings(BaseModel):
     # Diagnostic: also score each sentence against EVERY source (finds mis-citations).
     # Off in production (costs sentences x chunks NLI pairs); the answer eval turns it on.
     check_all_sources: bool = False
+    # Fitted by eval/fit_calibrator.py. Missing file -> answers have no confidence.
+    calibrator_path: Path = Path("models/calibrator.json")
 
 
 class Settings(BaseSettings):

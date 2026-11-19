@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Literal
 
 from codesearch.cache.keys import make_key
 from codesearch.config import Settings
+from codesearch.explain.calibration import Calibrator, features
 from codesearch.explain.groundedness import assess
 from codesearch.explain.trace import TraceBuilder, TraceStore
 from codesearch.generation.citations import strip_invalid, to_citations
@@ -64,6 +65,7 @@ class AnswerPipeline:
         cache: "TieredCache | None" = None,
         trace_store: TraceStore | None = None,
         grounder: EntailmentScorer | None = None,
+        calibrator: Calibrator | None = None,
     ) -> None:
         self.handle = handle
         self.retriver = retriever
@@ -75,6 +77,7 @@ class AnswerPipeline:
         self.cache = cache
         self.trace_store = trace_store
         self.grounder = grounder
+        self.calibrator = calibrator
 
     async def answer(
         self,
@@ -206,6 +209,12 @@ class AnswerPipeline:
             except Exception as e:
                 log.warning("groundedness.failed", trace_id=trace.trace_id, error=str(e))
 
+        # Confidence: a calibrated probability that this answer is good. Only for real
+        # answers (an abstain or a refusal has nothing to be confident about).
+        confidence: float | None = None
+        if self.calibrator is not None and not abstained:
+            confidence = self.calibrator.confidence(features(chunks, groundedness))
+
         # Step 11: Return completed Answer with total timing
         answer = self._finish(
             trace,
@@ -214,6 +223,7 @@ class AnswerPipeline:
             citations=citations,
             abstained=abstained,
             groundedness=groundedness,
+            confidence=confidence,
         )
         if self.cache is not None and not abstained:  # unchanged
             self.cache.set(key, answer)
@@ -229,6 +239,7 @@ class AnswerPipeline:
         citations: list[Citation],
         abstained: bool,
         groundedness: float | None = None,
+        confidence: float | None = None,
     ) -> Answer:
         """A fresh answer (or an abstain): build it, save its trace, return it."""
         trace.timings["total_ms"] = (time.perf_counter() - start) * 1000.0
@@ -241,6 +252,7 @@ class AnswerPipeline:
             index_version=self.handle.version,
             prompt_version=self.answer_prompt.version,
             groundedness=groundedness,
+            confidence=confidence,
         )
         self._save(trace)
         return answer

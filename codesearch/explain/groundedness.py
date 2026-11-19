@@ -64,10 +64,6 @@ def split_sentences(text: str) -> list[str]:
         if not line:
             continue
 
-        # 4. Split after ., !, or ? followed by whitespace:
-        #    - (?<!\d) prevents splitting when a digit precedes the punctuation
-        #    - an optional citation right after it ("updates. [3]", "[1, 2]") stays attached
-        #    - a function as the replacement: re's template syntax rejects "\x01"
         marked = re.sub(_SENTENCE_END, lambda m: m.group(1) + "\x01", line)
         sentences = [s.strip() for s in marked.split("\x01") if s.strip()]
 

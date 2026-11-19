@@ -28,6 +28,7 @@ from codesearch.cache.memory import LRUCache
 from codesearch.cache.semantic import SemanticCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
+from codesearch.explain.calibration import Calibrator
 from codesearch.explain.groundedness import NLIScorer
 from codesearch.explain.trace import TraceStore
 from codesearch.generation.llm import FakeLLM, OllamaLLM
@@ -93,6 +94,12 @@ def build_cache(settings: Settings, embedder: Embedder) -> TieredCache | None:
     )
 
 
+def load_calibrator(settings: Settings) -> Calibrator | None:
+    """The fitted calibrator, or None until eval/fit_calibrator.py has been run."""
+    path = settings.explain.calibrator_path
+    return Calibrator.load(path) if path.exists() else None
+
+
 def build_pipeline(settings: Settings) -> AnswerPipeline:
     handle = load_index(settings)
     embedder = build_embedder(settings)  # shared by retrieval and the semantic cache
@@ -115,4 +122,5 @@ def build_pipeline(settings: Settings) -> AnswerPipeline:
         cache=build_cache(settings, embedder),
         trace_store=TraceStore(settings.explain.trace_db),
         grounder=NLIScorer(settings.explain.nli_model) if settings.explain.groundedness else None,
+        calibrator=load_calibrator(settings),
     )

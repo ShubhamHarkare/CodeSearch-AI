@@ -16,7 +16,14 @@ from typing import Any
 import pytest
 
 from codesearch.errors import TraceNotFoundError
-from codesearch.schemas import Answer, Citation, ExplanationTrace, SentenceSupport
+from codesearch.schemas import (
+    Answer,
+    Chunk,
+    Citation,
+    ExplanationTrace,
+    ScoredChunk,
+    SentenceSupport,
+)
 from eval.answer_eval import (
     citation_precision,
     percentile,
@@ -62,6 +69,22 @@ def answer(
         trace_id=trace_id,
         index_version="iv",
         prompt_version="1",
+    )
+
+
+def cand(chunk_id: str, dense: float) -> ScoredChunk:
+    return ScoredChunk(
+        chunk=Chunk(
+            id=chunk_id,
+            url=PAGE_A,
+            anchor="",
+            title=chunk_id,
+            header_path=(chunk_id,),
+            text="t",
+            source_path="x.md",
+            start_line=1,
+        ),
+        dense_score=dense,
     )
 
 
@@ -166,6 +189,24 @@ def test_score_answer_for_an_answered_question() -> None:
             "best_chunk_id": None,
         },
     ]
+
+
+def test_score_answer_records_the_calibration_features() -> None:
+    """The features the calibrator will be fitted on: from the chunks sent to the LLM."""
+    trace = ExplanationTrace(
+        trace_id="t",
+        question="q",
+        standalone_question="q",
+        candidates=[cand("u1", 0.9), cand("u2", 0.7), cand("x", 0.95)],
+        used_chunk_ids=["u1", "u2"],  # "x" was retrieved but not sent
+        sentences=[],
+    )
+    record = score_answer(row("q1"), answer(PAGE_A, groundedness=0.5), trace)
+    assert record["features"] == pytest.approx([0.9, 0.8, 0.5])
+
+
+def test_score_answer_without_a_trace_has_no_features() -> None:
+    assert score_answer(row("q1"), answer(PAGE_A), None)["features"] is None
 
 
 def test_score_answer_without_citations() -> None:

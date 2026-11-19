@@ -21,6 +21,7 @@ from codesearch.cache.semantic import SemanticCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
 from codesearch.errors import IndexNotReadyError, LLMUnavailableError, TraceNotFoundError
+from codesearch.explain.calibration import Calibrator
 from codesearch.explain.groundedness import NLIScorer
 from codesearch.explain.trace import TraceStore
 from codesearch.factory import build_cache, build_pipeline
@@ -94,6 +95,7 @@ def make(
     answer_prompt: Any = None,
     trace_store: Any = None,
     grounder: Any = None,
+    calibrator: Any = None,
     explain: dict[str, Any] | None = None,
     **retrieval: Any,
 ) -> tuple[AnswerPipeline, Any]:
@@ -114,6 +116,7 @@ def make(
         cache=cache,
         trace_store=trace_store,
         grounder=grounder,
+        calibrator=calibrator,
     )
     return pipeline, llm
 
@@ -813,3 +816,93 @@ async def test_the_all_sources_diagnostic_can_be_switched_on(built: Any) -> None
     assert all(s.best_score == 0.9 for s in sentences)
     n_chunks = len(store.get(answer.trace_id).used_chunk_ids)
     assert len(grounder.calls[0]) == len(sentences) * n_chunks
+
+
+# =====================================================================
+# Confidence: a calibrated probability that the answer is good
+# =====================================================================
+
+
+class SpyCalibrator(Calibrator):
+    """A real Calibrator that also records the feature vectors it was given."""
+
+    def __init__(self) -> None:
+        super().__init__(coef=[0.0, 0.0, 2.0], intercept=-1.0)  # driven by groundedness
+        object.__setattr__(self, "seen", [])
+
+    def confidence(self, x: Any) -> float:
+        self.seen.append(list(x))  # type: ignore[attr-defined]
+        return super().confidence(x)
+
+
+async def test_an_answer_gets_a_calibrated_confidence(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(built, grounder=FakeGrounder(0.9), calibrator=calibrator)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.confidence is not None
+    assert answer.confidence == pytest.approx(calibrator.confidence(calibrator.seen[0]))
+    top, mean3, grounded = calibrator.seen[0]
+    assert grounded == answer.groundedness == 1.0
+    assert top >= mean3 > 0  # dense scores of the chunks sent to the LLM
+
+
+async def test_confidence_uses_the_chunks_sent_to_the_llm(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, calibrator=calibrator, rerank_top_n=3)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    used = [c for c in trace.candidates if c.chunk.id in trace.used_chunk_ids]
+    expected_top = max(c.dense_score for c in used if c.dense_score is not None)
+    assert calibrator.seen[0][0] == pytest.approx(expected_top)
+
+
+async def test_no_grounder_means_groundedness_feature_is_zero(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(built, calibrator=calibrator)
+    answer = await pipeline.answer(QUESTION)
+    assert calibrator.seen[0][2] == 0.0
+    assert answer.confidence is not None
+
+
+async def test_abstained_answers_have_no_confidence(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(built, calibrator=calibrator, threshold=ALWAYS_ABSTAIN)
+    assert (await pipeline.answer(QUESTION)).confidence is None
+    refusing, _ = make(built, llm=FakeLLM(responses=[NOT_COVERED]), calibrator=calibrator)
+    assert (await refusing.answer(QUESTION)).confidence is None
+    assert calibrator.seen == []
+
+
+async def test_without_a_calibrator_confidence_is_none(built: Any) -> None:
+    pipeline, _ = make(built, grounder=FakeGrounder(0.9))
+    assert (await pipeline.answer(QUESTION)).confidence is None
+
+
+async def test_a_cache_hit_keeps_the_original_confidence(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(
+        built, cache=memory_cache(), grounder=FakeGrounder(0.9), calibrator=calibrator
+    )
+    first = await pipeline.answer(QUESTION)
+    hit = await pipeline.answer(QUESTION)
+    assert hit.cache_tier == "exact"
+    assert hit.confidence == first.confidence
+    assert len(calibrator.seen) == 1
+
+
+def test_build_pipeline_loads_a_saved_calibrator(built: Any, tmp_path: Any) -> None:
+    settings, _ = built
+    path = tmp_path / "calibrator.json"
+    Calibrator(coef=[1.0, 1.0, 1.0], intercept=0.0).save(path)
+    pipeline = build_pipeline(settings.with_overrides(explain={"calibrator_path": path}))
+    assert pipeline.calibrator == Calibrator(coef=[1.0, 1.0, 1.0], intercept=0.0)
+
+
+def test_build_pipeline_without_a_calibrator_file(built: Any, tmp_path: Any) -> None:
+    """Not fitted yet: answers simply have no confidence (never a crash)."""
+    settings, _ = built
+    pipeline = build_pipeline(
+        settings.with_overrides(explain={"calibrator_path": tmp_path / "none.json"})
+    )
+    assert pipeline.calibrator is None

@@ -20,6 +20,7 @@ import typer
 
 from codesearch.config import Settings
 from codesearch.errors import TraceNotFoundError
+from codesearch.explain.calibration import features
 from codesearch.factory import build_pipeline
 from codesearch.schemas import Answer, ExplanationTrace
 from eval.golden import GoldenRow, load_golden
@@ -75,6 +76,13 @@ def score_answer(row: GoldenRow, answer: Answer, trace: ExplanationTrace | None)
         "partial": partial,
         "unsupported": unsupported,
         "total_ms": answer.timings.get("total_ms"),
+        # The calibration features, from the chunks that were actually sent to the LLM.
+        "features": None
+        if trace is None
+        else features(
+            [c for c in trace.candidates if c.chunk.id in trace.used_chunk_ids],
+            answer.groundedness,
+        ),
         "sentences": [
             {
                 "sentence": s.sentence,
