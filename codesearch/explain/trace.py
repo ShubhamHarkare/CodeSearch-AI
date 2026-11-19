@@ -41,6 +41,7 @@ class TraceBuilder:
         self._versions: dict[str, str] = {}
         self.timings: dict[str, float] = {}
         self._matched_terms: dict[str, dict[str, float]] = {}
+        self.answer: str | None = None
 
     def set_standalone(self, question: str) -> None:
         self.standalone_question = question
@@ -76,6 +77,9 @@ class TraceBuilder:
     def set_matched_terms(self, terms: dict[str, dict[str, float]]) -> None:
         self._matched_terms = dict(terms)
 
+    def set_answer(self, answer: str) -> None:
+        self.answer = answer
+
     @contextmanager
     def time(self, step: str) -> Iterator[None]:
         start = _time.perf_counter()
@@ -97,6 +101,7 @@ class TraceBuilder:
             versions=dict(self._versions),
             cache_tier=self._cache_tier,
             matched_terms=self._matched_terms,
+            answer=self.answer,
         )
 
 

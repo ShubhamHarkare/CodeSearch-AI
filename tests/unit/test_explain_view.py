@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from codesearch.ui.explain_view import (
+    attribution_rows,
     confidence_badge,
     format_matched,
     format_ms,
@@ -282,3 +283,36 @@ def test_badge_thresholds_match_the_calibrator_defaults() -> None:
     for c in (0.0, 0.39, 0.4, 0.6, 0.749, 0.75, 1.0):
         badge = confidence_badge(c)
         assert badge is not None and badge[0] == cal.level(c)
+
+
+# =====================================================================
+# attribution_rows: the Deep explain result, one row per source
+# =====================================================================
+
+
+def test_attribution_rows_follow_the_citation_numbers() -> None:
+    t = trace(
+        candidates=[
+            candidate("a", "useState"),
+            candidate("b", "Queueing"),
+            candidate("c", "Effects"),
+        ],
+        used_chunk_ids=["b", "a", "c"],
+    )
+    rows = attribution_rows(t, {"a": 0.25, "b": 0.75, "c": 0.0})
+    assert [(r["n"], r["title"], r["share"]) for r in rows] == [
+        (1, "Queueing", 0.75),
+        (2, "useState", 0.25),
+        (3, "Effects", 0.0),
+    ]
+    assert rows[0]["url"] == "https://react.dev/b"
+
+
+def test_attribution_rows_missing_score_counts_as_zero() -> None:
+    t = trace(candidates=[candidate("a"), candidate("b")], used_chunk_ids=["a", "b"])
+    assert [r["share"] for r in attribution_rows(t, {"a": 1.0})] == [1.0, 0.0]
+
+
+def test_attribution_rows_only_cover_sources_sent_to_the_model() -> None:
+    t = trace(candidates=[candidate("a"), candidate("b")], used_chunk_ids=["a"])
+    assert [r["title"] for r in attribution_rows(t, {"a": 1.0, "b": 0.0})] == ["a"]

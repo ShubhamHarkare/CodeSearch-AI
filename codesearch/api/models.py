@@ -74,3 +74,10 @@ class IndexInfo(BaseModel):
     changelog: list[ChangeLogEntry]
     prompt_version: str
     image_sha: str | None = None
+
+
+class DeepExplainResponse(BaseModel):
+    """POST /v1/explain/{trace_id}/deep: how much each source drove the answer."""
+
+    trace_id: str
+    scores: dict[str, float]  # chunk_id -> share of the answer (sums to 1, or all 0)

@@ -226,6 +226,22 @@ def test_explain_unknown_trace_raises_with_status_404() -> None:
     assert caught.value.status == 404
 
 
+def test_deep_explain_posts_and_returns_the_scores() -> None:
+    body = {"trace_id": "t-1", "scores": {"c1": 0.7, "c2": 0.3}}
+    api = Recorder(httpx.Response(200, json=body))
+    assert make(api).deep_explain("t-1") == body
+    assert api.requests[0].method == "POST"
+    assert api.requests[0].url == f"{BASE}/v1/explain/t-1/deep"
+
+
+def test_deep_explain_unavailable_raises_with_status_409() -> None:
+    body = {"error": "A deep explanation isn't available for this answer.", "trace_id": "x"}
+    with pytest.raises(ApiError) as caught:
+        make(Recorder(httpx.Response(409, json=body))).deep_explain("t-1")
+    assert caught.value.status == 409
+    assert "isn't available" in str(caught.value)
+
+
 # =====================================================================
 # Lifecycle and boundaries
 # =====================================================================

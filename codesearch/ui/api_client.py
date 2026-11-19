@@ -107,8 +107,14 @@ class ApiClient:
     def explain(self, trace_id: str) -> dict[str, Any]:
         return self._handle_response(self._request("GET", f"/v1/explain/{trace_id}"))
 
-    # Phase 2-3 (added with their endpoints): ask_stream, explain, deep_explain,
-    # send_feedback, metrics_summary.
+    def deep_explain(self, trace_id: str) -> dict[str, Any]:
+        """POST /v1/explain/{trace_id}/deep -> {"trace_id", "scores"} (slow: k LLM calls).
+
+        409 (cache hit, abstain) raises ApiError like any other error.
+        """
+        return self._handle_response(self._request("POST", f"/v1/explain/{trace_id}/deep"))
+
+    # Phase 3 (added with their endpoints): ask_stream, send_feedback, metrics_summary.
 
     def close(self) -> None:
         self._http.close()

@@ -77,6 +77,7 @@ class ExplanationTrace(BaseModel):
     versions: dict[str, str] = Field(default_factory=dict)
     cache_tier: Literal["exact", "semantic"] | None = None
     matched_terms: dict[str, dict[str, float]] = Field(default_factory=dict)
+    answer: str | None = None
 
 
 class Answer(BaseModel):

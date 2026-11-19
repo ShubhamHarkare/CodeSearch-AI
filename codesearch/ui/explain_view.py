@@ -168,3 +168,21 @@ def confidence_badge(confidence: float | None) -> tuple[str, str, str] | None:
         return None
     level = "high" if confidence >= HIGH_AT else "medium" if confidence >= LOW_AT else "low"
     return level, _BADGE_COLORS[level], f"{level} confidence {confidence:.0%}"
+
+
+def attribution_rows(trace: dict[str, Any], scores: dict[str, float]) -> list[dict[str, Any]]:
+    """The Deep explain result: one row per source sent to the model, numbered like the
+    citations, with the share of the answer that source drove (missing -> 0.0)."""
+    by_id = {c["chunk"]["id"]: c["chunk"] for c in trace.get("candidates", [])}
+    rows: list[dict[str, Any]] = []
+    for n, chunk_id in enumerate(trace.get("used_chunk_ids", []), start=1):
+        chunk = by_id.get(chunk_id, {"title": chunk_id, "url": None})
+        rows.append(
+            {
+                "n": n,
+                "title": chunk["title"],
+                "url": chunk["url"],
+                "share": float(scores.get(chunk_id, 0.0)),
+            }
+        )
+    return rows

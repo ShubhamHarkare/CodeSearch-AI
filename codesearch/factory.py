@@ -123,4 +123,5 @@ def build_pipeline(settings: Settings) -> AnswerPipeline:
         trace_store=TraceStore(settings.explain.trace_db),
         grounder=NLIScorer(settings.explain.nli_model) if settings.explain.groundedness else None,
         calibrator=load_calibrator(settings),
+        embedder=embedder,
     )
