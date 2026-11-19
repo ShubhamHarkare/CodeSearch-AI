@@ -33,13 +33,15 @@ from typing import TYPE_CHECKING, Literal
 
 from codesearch.cache.keys import make_key
 from codesearch.config import Settings
+from codesearch.errors import ExplainUnavailableError, TraceNotFoundError
+from codesearch.explain.attribution import leave_one_out
 from codesearch.explain.calibration import Calibrator, features
 from codesearch.explain.groundedness import assess
 from codesearch.explain.trace import TraceBuilder, TraceStore
 from codesearch.generation.citations import strip_invalid, to_citations
 from codesearch.generation.prompts import PromptTemplate, format_context
 from codesearch.index.handle import IndexHandle
-from codesearch.interfaces import LLM, EntailmentScorer, Reranker, Retriever
+from codesearch.interfaces import LLM, Embedder, EntailmentScorer, Reranker, Retriever
 from codesearch.log import get_logger, new_trace_id
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE, decide
 from codesearch.retrieval.condense import condense
@@ -66,6 +68,7 @@ class AnswerPipeline:
         trace_store: TraceStore | None = None,
         grounder: EntailmentScorer | None = None,
         calibrator: Calibrator | None = None,
+        embedder: Embedder | None = None,
     ) -> None:
         self.handle = handle
         self.retriver = retriever
@@ -78,6 +81,7 @@ class AnswerPipeline:
         self.trace_store = trace_store
         self.grounder = grounder
         self.calibrator = calibrator
+        self.embedder = embedder
 
     async def answer(
         self,
@@ -254,6 +258,7 @@ class AnswerPipeline:
             groundedness=groundedness,
             confidence=confidence,
         )
+        trace.set_answer(text)  # before saving: deep explain compares against it
         self._save(trace)
         return answer
 
@@ -284,3 +289,27 @@ class AnswerPipeline:
             self.trace_store.save(trace.build())
         except sqlite3.Error as e:
             log.warning("trace.save_failed", trace_id=trace.trace_id, error=str(e))
+
+    async def deep_explain(self, trace_id: str) -> dict[str, float]:
+        """Leave-one-out attribution for a stored answer: one LLM call per source."""
+        if self.trace_store is None:
+            raise TraceNotFoundError(f"no trace store, so no trace {trace_id!r}")
+        trace = self.trace_store.get(trace_id)  # raises TraceNotFoundError if unknown
+        if self.embedder is None:
+            raise ExplainUnavailableError("deep explain needs an embedder")
+
+        # The sources sent to the LLM, in prompt order (so [1] stays [1]).
+        by_id = {c.chunk.id: c for c in trace.candidates}
+        used = [by_id[cid] for cid in trace.used_chunk_ids if cid in by_id]
+        if not used or not trace.answer or trace.abstain_reason:
+            # a cache hit has no candidates; an abstain or refusal has nothing to attribute
+            raise ExplainUnavailableError(f"trace {trace_id!r} has no sources to attribute")
+
+        return await leave_one_out(
+            trace.standalone_question,  # the question the answer was written for
+            used,
+            trace.answer,
+            self.llm,
+            self.embedder,
+            self.answer_prompt,
+        )

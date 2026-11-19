@@ -90,3 +90,7 @@ class CacheUnavailableError(CodeSearchError):
 
     http_status: int = 503
     public_message: str = "The cache is unavailable."
+
+
+class ExplainUnavailableError(CodeSearchError):
+    http_status: int = 409

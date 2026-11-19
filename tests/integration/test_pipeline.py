@@ -20,7 +20,12 @@ from codesearch.cache.memory import LRUCache
 from codesearch.cache.semantic import SemanticCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
-from codesearch.errors import IndexNotReadyError, LLMUnavailableError, TraceNotFoundError
+from codesearch.errors import (
+    ExplainUnavailableError,
+    IndexNotReadyError,
+    LLMUnavailableError,
+    TraceNotFoundError,
+)
 from codesearch.explain.calibration import Calibrator
 from codesearch.explain.groundedness import NLIScorer
 from codesearch.explain.trace import TraceStore
@@ -96,6 +101,7 @@ def make(
     trace_store: Any = None,
     grounder: Any = None,
     calibrator: Any = None,
+    embedder: Any = None,
     explain: dict[str, Any] | None = None,
     **retrieval: Any,
 ) -> tuple[AnswerPipeline, Any]:
@@ -117,6 +123,7 @@ def make(
         trace_store=trace_store,
         grounder=grounder,
         calibrator=calibrator,
+        embedder=embedder,
     )
     return pipeline, llm
 
@@ -906,3 +913,70 @@ def test_build_pipeline_without_a_calibrator_file(built: Any, tmp_path: Any) -> 
         settings.with_overrides(explain={"calibrator_path": tmp_path / "none.json"})
     )
     assert pipeline.calibrator is None
+
+
+# =====================================================================
+# Deep explain: leave-one-out attribution on a stored answer
+# =====================================================================
+
+
+async def test_the_trace_keeps_the_answer_text(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    answer = await pipeline.answer(QUESTION)
+    assert store.get(answer.trace_id).answer == answer.text
+
+
+async def test_deep_explain_scores_every_source_sent_to_the_llm(built: Any) -> None:
+    store = TraceStore()
+    llm = FakeLLM()
+    pipeline, _ = make(built, llm=llm, trace_store=store, embedder=HashEmbedder(), rerank_top_n=3)
+    answer = await pipeline.answer(QUESTION)
+    calls_before = len(llm.prompts)
+
+    scores = await pipeline.deep_explain(answer.trace_id)
+
+    assert list(scores) == store.get(answer.trace_id).used_chunk_ids
+    assert len(llm.prompts) - calls_before == 3  # one regeneration per source
+    # the regenerations ask the question that was actually searched
+    assert all(QUESTION in p for p in llm.prompts[calls_before:])
+
+
+async def test_deep_explain_on_a_cache_hit_is_unavailable(built: Any) -> None:
+    """A cache hit never retrieved anything this time: there are no sources to remove."""
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, cache=memory_cache(), embedder=HashEmbedder())
+    await pipeline.answer(QUESTION)
+    hit = await pipeline.answer(QUESTION)
+    with pytest.raises(ExplainUnavailableError):
+        await pipeline.deep_explain(hit.trace_id)
+
+
+async def test_deep_explain_on_an_abstain_is_unavailable(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, embedder=HashEmbedder(), threshold=ALWAYS_ABSTAIN)
+    answer = await pipeline.answer(QUESTION)
+    with pytest.raises(ExplainUnavailableError):
+        await pipeline.deep_explain(answer.trace_id)
+
+
+async def test_deep_explain_of_an_unknown_trace(built: Any) -> None:
+    pipeline, _ = make(built, trace_store=TraceStore(), embedder=HashEmbedder())
+    with pytest.raises(TraceNotFoundError):
+        await pipeline.deep_explain("nope")
+
+
+async def test_deep_explain_needs_an_embedder_and_a_trace_store(built: Any) -> None:
+    no_embedder, _ = make(built, trace_store=TraceStore())
+    answer = await no_embedder.answer(QUESTION)
+    with pytest.raises(ExplainUnavailableError):
+        await no_embedder.deep_explain(answer.trace_id)
+
+    no_store, _ = make(built, embedder=HashEmbedder())
+    with pytest.raises(TraceNotFoundError):
+        await no_store.deep_explain("anything")
+
+
+def test_build_pipeline_gives_the_pipeline_its_embedder(built: Any) -> None:
+    settings, _ = built
+    assert build_pipeline(settings).embedder is not None

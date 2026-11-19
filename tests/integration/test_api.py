@@ -24,7 +24,12 @@ from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.memory import LRUCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
-from codesearch.errors import IndexNotReadyError, LLMUnavailableError, TraceNotFoundError
+from codesearch.errors import (
+    ExplainUnavailableError,
+    IndexNotReadyError,
+    LLMUnavailableError,
+    TraceNotFoundError,
+)
 from codesearch.explain.trace import TraceStore
 from codesearch.generation.llm import FakeLLM
 from codesearch.generation.prompts import load_prompt
@@ -99,6 +104,7 @@ def make_pipeline(
         settings=settings,
         cache=cache,
         trace_store=trace_store if trace_store is not None else TraceStore(),
+        embedder=HashEmbedder(),
     )
     return settings, pipeline
 
@@ -410,7 +416,14 @@ async def test_create_app_with_no_index_built_yet(built: Any, tmp_path: Any) -> 
 def test_openapi_lists_the_phase_1_routes(built: Any) -> None:
     settings, _ = built
     paths = create_app(settings).openapi()["paths"]
-    assert {"/v1/ask", "/healthz", "/readyz", "/v1/index", "/v1/explain/{trace_id}"} <= set(paths)
+    assert {
+        "/v1/ask",
+        "/healthz",
+        "/readyz",
+        "/v1/index",
+        "/v1/explain/{trace_id}",
+        "/v1/explain/{trace_id}/deep",
+    } <= set(paths)
 
 
 # =====================================================================
@@ -462,3 +475,33 @@ async def test_explain_without_a_trace_store_is_404(built: Any) -> None:
     async with serve(create_app(settings, pipeline=pipeline)) as c:
         r = await c.get("/v1/explain/anything")
     assert r.status_code == 404
+
+
+# =====================================================================
+# POST /v1/explain/{trace_id}/deep
+# =====================================================================
+
+
+async def test_deep_explain_returns_a_score_per_source(client: Client) -> None:
+    async with client() as c:
+        answer = (await c.post("/v1/ask", json={"question": QUESTION})).json()
+        trace = (await c.get(f"/v1/explain/{answer['trace_id']}")).json()
+        r = await c.post(f"/v1/explain/{answer['trace_id']}/deep")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["trace_id"] == answer["trace_id"]
+    assert list(body["scores"]) == trace["used_chunk_ids"]
+
+
+async def test_deep_explain_of_an_unknown_trace_is_404(client: Client) -> None:
+    async with client() as c:
+        r = await c.post("/v1/explain/nope/deep")
+    assert r.status_code == 404
+
+
+async def test_deep_explain_of_an_abstained_answer_is_409(client: Client) -> None:
+    async with client(threshold=ALWAYS_ABSTAIN) as c:
+        answer = (await c.post("/v1/ask", json={"question": "capital of France?"})).json()
+        r = await c.post(f"/v1/explain/{answer['trace_id']}/deep")
+    assert r.status_code == 409
+    assert r.json()["error"] == ExplainUnavailableError.public_message
