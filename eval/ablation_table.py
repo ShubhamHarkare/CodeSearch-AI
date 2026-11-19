@@ -9,8 +9,8 @@ The README keeps the table between two markers, so only that block is rewritten:
     ...
     <!-- ablation:end -->
 
-Section-level metrics are left blank for v1-chunked runs: v1 chunks have no section
-anchors, so only the page_* metrics compare fairly against v2.
+Every config is scored on the same columns: v1 chunks carry section anchors as
+metadata, so section-level metrics compare fairly too.
 """
 
 from __future__ import annotations
@@ -30,17 +30,17 @@ END = "<!-- ablation:end -->"
 # Rows in reading order: baseline, single retrievers, fusion, rerankers.
 ORDER = ["v1", "bm25", "dense", "hybrid", "dense_rerank", "hybrid_rerank", "hybrid_rerank_bge"]
 
-# (header, metric key, section-level?) — section-level ones are blank for v1 chunks.
-COLUMNS: list[tuple[str, str, bool]] = [
-    ("R@1", "recall_at_1", True),
-    ("R@5", "recall_at_5", True),
-    ("MRR", "mrr", True),
-    ("nDCG@10", "ndcg_at_10", True),
-    ("Page hit@5", "page_hit_at_5", False),
-    ("Page MRR", "page_mrr", False),
-    ("Pool recall", "pool_recall", True),
-    ("OOS abstain", "abstain_recall", False),
-    ("False abstain", "false_abstain_rate", False),
+# (header, metric key)
+COLUMNS: list[tuple[str, str]] = [
+    ("R@1", "recall_at_1"),
+    ("R@5", "recall_at_5"),
+    ("MRR", "mrr"),
+    ("nDCG@10", "ndcg_at_10"),
+    ("Page hit@5", "page_hit_at_5"),
+    ("Page MRR", "page_mrr"),
+    ("Pool recall", "pool_recall"),
+    ("OOS abstain", "abstain_recall"),
+    ("False abstain", "false_abstain_rate"),
 ]
 BLANK = "n/a"
 
@@ -83,25 +83,21 @@ def render_table(
     """
     names = ordered(list(results))
     best: dict[str, float] = {}
-    for _, key, section in COLUMNS:
-        values = [
-            results[n]["metrics"][key]
-            for n in names
-            if key in results[n]["metrics"] and not (section and _is_v1(results[n]))
-        ]
+    for _, key in COLUMNS:
+        values = [results[n]["metrics"][key] for n in names if key in results[n]["metrics"]]
         if len(values) > 1:  # "best" only means something with something to beat
             best[key] = min(values) if key == "false_abstain_rate" else max(values)
 
-    header = "| Config | What it does | " + " | ".join(h for h, _, _ in COLUMNS) + " |"
+    header = "| Config | What it does | " + " | ".join(h for h, _ in COLUMNS) + " |"
     divider = "|---|---|" + "|".join("---:" for _ in COLUMNS) + "|"
     lines = [header, divider]
     for name in names:
         result = results[name]
         label = f"**{name}** (default)" if name == default else name
         cells = [label, describe(name, configs_dir)]
-        for _, key, section in COLUMNS:
+        for _, key in COLUMNS:
             value = result["metrics"].get(key)
-            if value is None or (section and _is_v1(result)):
+            if value is None:
                 cells.append(BLANK)
                 continue
             text = f"{value:.3f}"
@@ -115,14 +111,9 @@ def render_table(
     lines.append(
         f"{n} in-scope questions{f' + {oos} out-of-scope' if oos else ''} from "
         "`eval/golden.jsonl`. Best value per column in bold. "
-        f"{BLANK} = not measured, or not comparable (v1 chunks have no section anchors, "
-        "so compare v1 on the page columns)."
+        f"{BLANK} = not measured for that config."
     )
     return "\n".join(lines)
-
-
-def _is_v1(result: dict[str, Any]) -> bool:
-    return bool(result.get("params", {}).get("chunk_strategy") == "v1")
 
 
 def replace_block(text: str, table: str) -> str:

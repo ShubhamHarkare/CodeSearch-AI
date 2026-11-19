@@ -78,7 +78,7 @@ Ablation on 79 hand-written questions: 55 answerable from the docs and 24 that a
 <!-- ablation:start -->
 | Config | What it does | R@1 | R@5 | MRR | nDCG@10 | Page hit@5 | Page MRR | Pool recall | OOS abstain | False abstain |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| v1 | v1-style chunking + dense top-3 (baseline) | n/a | n/a | n/a | n/a | 0.855 | 0.721 | n/a | **0.917** | 0.164 |
+| v1 | v1 chunking (headings, then 1,000-char recursive split, 150 overlap) + dense top-10 | 0.330 | 0.648 | 0.556 | 0.569 | 0.873 | 0.705 | 0.745 | 0.833 | 0.109 |
 | bm25 | v2 chunking + BM25 top-10 | 0.188 | 0.479 | 0.379 | 0.405 | 0.836 | 0.642 | 0.567 | n/a | n/a |
 | **dense** (default) | v2 chunking + dense top-10 | **0.345** | 0.673 | **0.574** | **0.585** | 0.982 | **0.784** | 0.752 | **0.917** | 0.127 |
 | hybrid | v2 chunking + BM25/dense fused with RRF | 0.318 | 0.612 | 0.554 | 0.553 | 0.927 | 0.746 | **0.915** | **0.917** | 0.127 |
@@ -86,7 +86,7 @@ Ablation on 79 hand-written questions: 55 answerable from the docs and 24 that a
 | hybrid_rerank | hybrid RRF candidates + cross-encoder rerank | 0.282 | 0.636 | 0.540 | 0.557 | **1.000** | 0.729 | **0.915** | 0.875 | **0.018** |
 | hybrid_rerank_bge | hybrid RRF candidates + bge-reranker-base | 0.279 | 0.615 | 0.497 | 0.527 | 0.909 | 0.680 | **0.915** | 0.875 | 0.055 |
 
-55 in-scope questions + 24 out-of-scope from `eval/golden.jsonl`. Best value per column in bold. n/a = not measured, or not comparable (v1 chunks have no section anchors, so compare v1 on the page columns).
+55 in-scope questions + 24 out-of-scope from `eval/golden.jsonl`. Best value per column in bold. n/a = not measured for that config.
 <!-- ablation:end -->
 
 What the table says, and how far to trust it:
@@ -99,17 +99,19 @@ What the table says, and how far to trust it:
 - **These differences are small.** With 55 in-scope questions, one question moves MRR by
   about 0.02, so dense vs hybrid (0.574 vs 0.554) is roughly one question. Confidence
   intervals and a larger golden set are next.
-- **The v1 row is not a clean baseline.** It retrieves 3 chunks (so "hit@5" is really
-  hit@3) and uses fixed 1,000-character cuts, while the original v1 split by headers with
-  overlap. Read the v1 → v2 gap as an upper bound until the baseline is re-run at equal k
-  with v1's real splitter.
+- **v1 → v2 chunking helps you find the right page, not the right section.** The v1 row
+  re-implements the original app's chunking (heading split, then a recursive 1,000-char
+  split with 150 overlap) and keeps everything else equal to `dense`. v2 puts the right
+  page in the top 5 for 98% of questions vs 87% (6 more of 55), but section-level R@1,
+  R@5 and MRR move by about one question. A likely reason: v2 starts every chunk with its
+  "Page > Section" path, so the embedding knows which page it came from.
 - **Abstention numbers are optimistic.** The threshold (0.755) was tuned on the same 24
-  out-of-scope questions it is reported on, and the same cosine-tuned value is applied to
-  cross-encoder scores, so the reranker rows sit at a different operating point. Their
+  out-of-scope questions it is reported on, and the same value is applied to every row,
+  so v1 and the reranker rows sit at different operating points. Their
   lower false-abstain rate is a lead to follow up, not a like-for-like win.
 
-Metrics: section-level recall@k, MRR and nDCG@10 against labelled section anchors;
-page-level variants for comparison with v1, whose chunks have no anchors.
+Metrics: section-level recall@k, MRR and nDCG@10 against labelled section anchors, plus
+page-level hit@5 and MRR.
 
 ### Answer quality
 

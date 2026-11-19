@@ -193,7 +193,10 @@ def test_repo_v1_config() -> None:
     cfg = load_config(CONFIGS / "v1.yaml")
     assert cfg.name == "v1"
     assert cfg.overrides["index"]["chunk_strategy"] == "v1"
-    assert cfg.overrides["retrieval"] == {"mode": "dense", "dense_k": 3}
+    assert cfg.overrides["index"]["chunk_overlap"] == 150
+    # same retrieval as the dense row, so the two rows differ only in chunking
+    dense = load_config(CONFIGS / "dense.yaml")
+    assert cfg.overrides["retrieval"] == dense.overrides["retrieval"]
     # v1 must never share an index directory with the v2 index
     assert cfg.overrides["index"]["index_dir"] != "index"
 

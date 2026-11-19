@@ -89,19 +89,19 @@ def test_missing_metrics_are_blank(configs: Path) -> None:
     assert bm25_row.count(BLANK) == 8  # everything except MRR
 
 
-def test_v1_section_metrics_are_blank_but_page_metrics_show(configs: Path) -> None:
+def test_v1_competes_on_every_column(configs: Path) -> None:
+    """v1 chunks carry anchors now, so its section metrics show and can win."""
     table = render_table(
         {
-            "v1": result("v1", "v1", mrr=0.027, page_hit_at_5=0.855),
+            "v1": result("v1", "v1", mrr=0.6, page_hit_at_5=0.9),
             "dense": result("dense", mrr=0.574, page_hit_at_5=0.982),
         },
         configs_dir=configs,
     )
     v1_row = next(line for line in table.splitlines() if line.startswith("| v1"))
-    assert "0.027" not in v1_row  # not comparable: v1 chunks have no anchors
-    assert "0.855" in v1_row
-    assert "**0.982**" in table  # page columns compete: v2 beats v1
-    assert "**0.574**" not in table  # v1's near-zero MRR doesn't compete for "best"
+    assert "**0.600**" in v1_row
+    assert "0.900" in v1_row
+    assert "**0.982**" in table
 
 
 def test_footer_says_how_many_questions(configs: Path) -> None:
