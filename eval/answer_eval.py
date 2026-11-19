@@ -26,6 +26,9 @@ from eval.golden import GoldenRow, load_golden
 from eval.metrics import to_page
 from eval.run_eval import GOLDEN_PATH, load_config
 
+# Same as the groundedness default: a best_score at or above this counts as support.
+SUPPORTED_AT = 0.7
+
 
 def citation_precision(cited_urls: Sequence[str], expected_urls: Sequence[str]) -> float | None:
     if not cited_urls:
@@ -73,7 +76,13 @@ def score_answer(row: GoldenRow, answer: Answer, trace: ExplanationTrace | None)
         "unsupported": unsupported,
         "total_ms": answer.timings.get("total_ms"),
         "sentences": [
-            {"sentence": s.sentence, "label": s.label, "score": s.score}
+            {
+                "sentence": s.sentence,
+                "label": s.label,
+                "score": s.score,
+                "best_score": s.best_score,
+                "best_chunk_id": s.best_chunk_id,
+            }
             for s in (trace.sentences if trace else [])
         ],
     }
@@ -110,6 +119,14 @@ def summarize(records: Sequence[dict[str, Any]]) -> dict[str, float]:
         metrics["supported_share"] = supported / total
         metrics["partial_share"] = partial / total
         metrics["unsupported_share"] = unsupported / total
+
+    # The mis-citation diagnostic (only when sentences carry a best_score).
+    checked = [s for r in answered for s in r["sentences"] if s.get("best_score") is not None]
+    if checked:
+        anywhere = [s for s in checked if s["best_score"] >= SUPPORTED_AT]
+        metrics["supported_anywhere_share"] = len(anywhere) / len(checked)
+        miscited = [s for s in anywhere if s["label"] != "supported"]
+        metrics["miscited_share"] = len(miscited) / len(checked)
 
     if out_scope:
         refusals = sum(1 for r in out_scope if r["abstained"])
@@ -167,7 +184,7 @@ def run(
     if pipeline is None:
         settings = Settings().with_overrides(**cfg.overrides)
         settings = settings.with_overrides(
-            cache={"enabled": False}, explain={"trace_db": ":memory:"}
+            cache={"enabled": False}, explain={"trace_db": ":memory:", "check_all_sources": True}
         )
         pipeline = build_pipeline(settings)
 
@@ -184,7 +201,17 @@ def _write(name: str, records: list[dict[str, Any]], results_dir: Path) -> dict[
     )
     with (results_dir / f"sentences_{name}.csv").open("w", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["id", "question", "sentence", "label", "score", "human"]
+            f,
+            fieldnames=[
+                "id",
+                "question",
+                "sentence",
+                "label",
+                "score",
+                "best_score",
+                "best_chunk_id",
+                "human",
+            ],
         )
         writer.writeheader()
         writer.writerows(sentence_rows(records))
@@ -204,7 +231,9 @@ def main(
 
     cfg = load_config(config)
     settings = Settings().with_overrides(**cfg.overrides)
-    settings = settings.with_overrides(cache={"enabled": False}, explain={"trace_db": ":memory:"})
+    settings = settings.with_overrides(
+        cache={"enabled": False}, explain={"trace_db": ":memory:", "check_all_sources": True}
+    )
     pipeline = build_pipeline(settings)
     rows = load_golden(GOLDEN_PATH)
     records = asyncio.run(run_answers(pipeline, rows, limit=limit, on_progress=progress))

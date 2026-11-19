@@ -55,6 +55,10 @@ class SentenceSupport(BaseModel):
     cited_chunk_ids: list[str]
     label: Literal["supported", "partial", "unsupported"]
     score: float
+    # Diagnostic only (explain.check_all_sources): the best entailment against ANY
+    # source, and which source. High best_score + low score = a mis-citation.
+    best_score: float | None = None
+    best_chunk_id: str | None = None
 
 
 class ExplanationTrace(BaseModel):

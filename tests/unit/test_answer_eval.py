@@ -65,7 +65,7 @@ def answer(
     )
 
 
-def trace_with(*labels: str, trace_id: str = "t") -> ExplanationTrace:
+def trace_with(*labels: str, trace_id: str = "t", best: float | None = None) -> ExplanationTrace:
     return ExplanationTrace(
         trace_id=trace_id,
         question="q",
@@ -73,7 +73,14 @@ def trace_with(*labels: str, trace_id: str = "t") -> ExplanationTrace:
         candidates=[],
         used_chunk_ids=[],
         sentences=[
-            SentenceSupport(sentence=f"S{i}.", cited_chunk_ids=["c1"], label=label, score=0.5)  # type: ignore[arg-type]
+            SentenceSupport(  # type: ignore[arg-type]
+                sentence=f"S{i}.",
+                cited_chunk_ids=["c1"],
+                label=label,
+                score=0.5,
+                best_score=best,
+                best_chunk_id=None if best is None else "c2",
+            )
             for i, label in enumerate(labels)
         ],
     )
@@ -144,8 +151,20 @@ def test_score_answer_for_an_answered_question() -> None:
     assert record["total_ms"] == 8000.0
     assert record["answer"] == "An answer [1]."
     assert record["sentences"] == [
-        {"sentence": "S0.", "label": "supported", "score": 0.5},
-        {"sentence": "S1.", "label": "unsupported", "score": 0.5},
+        {
+            "sentence": "S0.",
+            "label": "supported",
+            "score": 0.5,
+            "best_score": None,
+            "best_chunk_id": None,
+        },
+        {
+            "sentence": "S1.",
+            "label": "unsupported",
+            "score": 0.5,
+            "best_score": None,
+            "best_chunk_id": None,
+        },
     ]
 
 
@@ -230,6 +249,31 @@ def test_summarize_of_nothing_is_empty() -> None:
     assert summarize([]) == {}
 
 
+def test_summarize_mis_citation_when_the_diagnostic_ran() -> None:
+    """Every sentence scored 0.5 against its citation (not supported) but 0.9 against
+    some other chunk: all of them are mis-cited, all are supported somewhere."""
+    records = [
+        score_answer(row("q1"), answer(PAGE_A), trace_with("unsupported", "partial", best=0.9)),
+        score_answer(row("q2"), answer(PAGE_A), trace_with("unsupported", best=0.2)),
+    ]
+    m = summarize(records)
+    assert m["supported_anywhere_share"] == pytest.approx(2 / 3)
+    assert m["miscited_share"] == pytest.approx(2 / 3)
+
+
+def test_summarize_a_supported_sentence_is_never_miscited() -> None:
+    records = [score_answer(row("q1"), answer(PAGE_A), trace_with("supported", best=0.95))]
+    m = summarize(records)
+    assert m["miscited_share"] == 0.0
+    assert m["supported_anywhere_share"] == 1.0
+
+
+def test_summarize_has_no_diagnostic_metrics_without_the_diagnostic() -> None:
+    m = summarize([score_answer(row("q1"), answer(PAGE_A), trace_with("unsupported"))])
+    assert "miscited_share" not in m
+    assert "supported_anywhere_share" not in m
+
+
 # =====================================================================
 # sentence_rows: the CSV you label by hand to tune the thresholds
 # =====================================================================
@@ -247,7 +291,16 @@ def test_sentence_rows_one_per_sentence_with_a_blank_human_column() -> None:
         ("q2", "S0.", "unsupported"),
     ]
     assert all(r["human"] == "" for r in rows)
-    assert set(rows[0]) == {"id", "question", "sentence", "label", "score", "human"}
+    assert set(rows[0]) == {
+        "id",
+        "question",
+        "sentence",
+        "label",
+        "score",
+        "best_score",
+        "best_chunk_id",
+        "human",
+    }
 
 
 # =====================================================================
@@ -334,4 +387,5 @@ def test_run_writes_results_and_the_sentence_csv(tmp_path: Path) -> None:
     with (tmp_path / "out" / "sentences_dense.csv").open() as f:
         table = list(csv.DictReader(f))
     assert [t["label"] for t in table] == ["supported", "unsupported"]
+    assert "best_score" in table[0]
     assert table[0]["human"] == ""

@@ -31,7 +31,7 @@ class RetrievalSettings(BaseModel):
     dense_k: int = 20
     rrf_k: int = 60
     reranker_model: str | None = None
-    rerank_top_n: int = 5
+    rerank_top_n: int = 3
     abstain_threshold: float = 0.755
     history_turns: int = 3
 
@@ -76,8 +76,11 @@ class ExplainSettings(BaseModel):
     trace_db: Path = Path("traces/trace.db")
     groundedness: bool = True
     supported_threshold: float = 0.7
-    nli_model: str = "cross-encoder/nli-deberta-v3-small"
+    nli_model: str = "cross-encoder/nli-deberta-v3-base"
     partial_threshold: float = 0.4
+    # Diagnostic: also score each sentence against EVERY source (finds mis-citations).
+    # Off in production (costs sentences x chunks NLI pairs); the answer eval turns it on.
+    check_all_sources: bool = False
 
 
 class Settings(BaseSettings):

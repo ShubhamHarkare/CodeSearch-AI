@@ -3,7 +3,7 @@
 What goes here:
     - ``split_sentences(answer) -> list[str]``: skips code blocks; keeps
       citation markers attached to their sentence.
-    - ``NLIScorer(model_name="cross-encoder/nli-deberta-v3-small")``:
+    - ``NLIScorer(model_name="cross-encoder/nli-deberta-v3-base")``:
       ``entailment(premise=chunk_text, hypothesis=sentence) -> float``.
     - ``assess(answer, citations, chunks, scorer) -> tuple[list[SentenceSupport], float]``:
         * label each sentence supported (>= 0.7) / partial (>= 0.4) / unsupported
@@ -30,7 +30,7 @@ from codesearch.generation.citations import extract_citations
 from codesearch.interfaces import EntailmentScorer
 from codesearch.schemas import Citation, ScoredChunk, SentenceSupport
 
-DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-small"
+DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-base"
 
 # End of a sentence: . ! or ? (not right after a digit, so "18.2" survives), plus an
 # optional citation such as " [3]" or " [1, 2]", then the whitespace we split on.
@@ -96,6 +96,7 @@ def assess(
     *,
     supported_at: float = 0.7,
     partial_at: float = 0.4,
+    all_sources: bool = False,
 ) -> tuple[list[SentenceSupport], float | None]:
     number_to_id = {c.number: c.chunk_id for c in citations}
     id_to_text = {c.chunk.id: c.chunk.text for c in chunks}
@@ -110,26 +111,35 @@ def assess(
                 if num in number_to_id and number_to_id[num] in id_to_text
             )
         )
-        if not ids and is_connective(sentence):
-            continue
-
         hypothesis = re.sub(r"\s*\[\d+(?:\s*,\s*\d+)*\]", "", sentence).strip()
+        # A lone "[3]" (empty once the markers are gone) or a lead-in like
+        # "Key points:" is not a claim: don't grade it.
+        if not hypothesis or (not ids and is_connective(sentence)):
+            continue
         plan.append((sentence, ids, hypothesis))
 
     if not plan:
         return [], None
 
-    # Single batched entailment call across all cited (chunk, hypothesis) pairs
-    pairs = [(id_to_text[chunk_id], hypothesis) for _, ids, hypothesis in plan for chunk_id in ids]
+    # Single batched entailment call. Each (chunk, hypothesis) pair is sent once;
+    # `position` remembers where its score will be. With all_sources, every sentence is
+    # also paired with every chunk (the mis-citation diagnostic).
+    pairs: list[tuple[str, str]] = []
+    position: dict[tuple[str, str], int] = {}
+    for _, ids, hypothesis in plan:
+        for chunk_id in list(id_to_text) if all_sources else ids:
+            if (chunk_id, hypothesis) not in position:
+                position[(chunk_id, hypothesis)] = len(pairs)
+                pairs.append((id_to_text[chunk_id], hypothesis))
     scores = scorer.entailment(pairs) if pairs else []
     if len(scores) != len(pairs):
         raise ValueError(f"Expected {len(pairs)} entailment scores, got {len(scores)}")
 
     # Pass 2: map scores back to sentences and assign labels
     results: list[SentenceSupport] = []
-    it = iter(scores)
-    for sentence, ids, _ in plan:
-        score = max((next(it) for _ in ids), default=0.0)
+    for sentence, ids, hypothesis in plan:
+        # The label judges only the CITED sources, with or without the diagnostic.
+        score = max((scores[position[(cid, hypothesis)]] for cid in ids), default=0.0)
         label: Literal["supported", "partial", "unsupported"]
         if score >= supported_at:
             label = "supported"
@@ -138,12 +148,20 @@ def assess(
         else:
             label = "unsupported"
 
+        best_score: float | None = None
+        best_chunk_id: str | None = None
+        if all_sources and id_to_text:
+            best_chunk_id = max(id_to_text, key=lambda cid: scores[position[(cid, hypothesis)]])
+            best_score = scores[position[(best_chunk_id, hypothesis)]]
+
         results.append(
             SentenceSupport(
                 sentence=sentence,
                 cited_chunk_ids=ids,
                 label=label,
                 score=score,
+                best_score=best_score,
+                best_chunk_id=best_chunk_id,
             )
         )
 

@@ -792,3 +792,24 @@ def test_build_pipeline_adds_the_nli_grounder_when_enabled(built: Any) -> None:
 def test_build_pipeline_without_groundedness(built: Any) -> None:
     settings, _ = built
     assert build_pipeline(settings).grounder is None  # the fixture turns it off
+
+
+async def test_the_all_sources_diagnostic_is_off_by_default(built: Any) -> None:
+    """In production each sentence is checked only against what it cites (cheap)."""
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=FakeGrounder(0.9))
+    answer = await pipeline.answer(QUESTION)
+    assert all(s.best_score is None for s in store.get(answer.trace_id).sentences)
+
+
+async def test_the_all_sources_diagnostic_can_be_switched_on(built: Any) -> None:
+    store = TraceStore()
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(
+        built, trace_store=store, grounder=grounder, explain={"check_all_sources": True}
+    )
+    answer = await pipeline.answer(QUESTION)
+    sentences = store.get(answer.trace_id).sentences
+    assert all(s.best_score == 0.9 for s in sentences)
+    n_chunks = len(store.get(answer.trace_id).used_chunk_ids)
+    assert len(grounder.calls[0]) == len(sentences) * n_chunks

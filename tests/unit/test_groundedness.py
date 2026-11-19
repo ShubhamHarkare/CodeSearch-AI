@@ -255,6 +255,102 @@ def test_a_scorer_returning_the_wrong_number_of_scores_is_an_error() -> None:
 
 
 # =====================================================================
+# Citation-only fragments: a stray "[3]" is not a claim
+# =====================================================================
+
+
+def test_a_trailing_citation_on_its_own_is_not_graded() -> None:
+    """gemma often ends an answer with a lone "[3]"; it must not count as an
+    unsupported sentence (its hypothesis would be empty)."""
+    scorer = FakeScorer(0.9)
+    sentences, groundedness = assess("It returns a pair [1]. [2]", CITATIONS, CHUNKS, scorer)
+    assert [s.sentence for s in sentences] == ["It returns a pair [1]."]
+    assert groundedness == 1.0
+    assert len(scorer.calls[0]) == 1  # the fragment never reached the model
+
+
+def test_an_answer_that_is_only_citations_has_nothing_to_judge() -> None:
+    scorer = FakeScorer(0.9)
+    assert assess("[1][2]\n[1, 2]", CITATIONS, CHUNKS, scorer) == ([], None)
+    assert scorer.calls == []
+
+
+# =====================================================================
+# all_sources: the mis-citation diagnostic
+# =====================================================================
+
+
+def by_premise(scores: dict[str, float]) -> FakeScorer:
+    """A scorer that only looks at which chunk the premise is."""
+    text_to_id = {c.chunk.text: c.chunk.id for c in CHUNKS}
+    return FakeScorer(lambda premise, _h: scores[text_to_id[premise]])
+
+
+def test_all_sources_finds_support_in_a_chunk_the_sentence_did_not_cite() -> None:
+    """Cited [1] scores 0.1, but chunk c2 supports it at 0.9: a mis-citation."""
+    sentences, groundedness = assess(
+        "It queues the update [1].",
+        CITATIONS,
+        CHUNKS,
+        by_premise({"c1": 0.1, "c2": 0.9}),
+        all_sources=True,
+    )
+    s = sentences[0]
+    assert s.score == 0.1  # the label still judges the CITED source
+    assert s.label == "unsupported"
+    assert s.best_score == 0.9
+    assert s.best_chunk_id == "c2"
+    assert groundedness == 0.0  # groundedness is unchanged by the diagnostic
+
+
+def test_all_sources_also_checks_uncited_claims() -> None:
+    sentences, _ = assess(
+        "React queues updates.",
+        CITATIONS,
+        CHUNKS,
+        by_premise({"c1": 0.2, "c2": 0.8}),
+        all_sources=True,
+    )
+    s = sentences[0]
+    assert (s.label, s.score, s.cited_chunk_ids) == ("unsupported", 0.0, [])
+    assert (s.best_score, s.best_chunk_id) == (0.8, "c2")
+
+
+def test_all_sources_scores_each_pair_once_in_one_batch() -> None:
+    """Each sentence against each chunk, once: the cited pair isn't scored twice."""
+    scorer = FakeScorer(0.5)
+    assess("A [1]. B [2].", CITATIONS, CHUNKS, scorer, all_sources=True)
+    assert len(scorer.calls) == 1
+    pairs = scorer.calls[0]
+    assert len(pairs) == 4  # A-c1, A-c2, B-c1, B-c2
+    assert len(set(pairs)) == 4
+
+
+def test_all_sources_when_the_cited_chunk_is_also_the_best() -> None:
+    sentences, _ = assess(
+        "It returns a pair [1].",
+        CITATIONS,
+        CHUNKS,
+        by_premise({"c1": 0.95, "c2": 0.3}),
+        all_sources=True,
+    )
+    assert (sentences[0].label, sentences[0].best_chunk_id) == ("supported", "c1")
+
+
+def test_without_all_sources_there_is_no_best_score() -> None:
+    sentences, _ = assess("It returns a pair [1].", CITATIONS, CHUNKS, FakeScorer(0.9))
+    assert sentences[0].best_score is None
+    assert sentences[0].best_chunk_id is None
+
+
+def test_all_sources_still_skips_connectives_and_fragments() -> None:
+    scorer = FakeScorer(0.9)
+    sentences, _ = assess("Key points:\n- A [1]. [2]", CITATIONS, CHUNKS, scorer, all_sources=True)
+    assert [s.sentence for s in sentences] == ["A [1]."]
+    assert len(scorer.calls[0]) == 2  # A against both chunks, nothing else
+
+
+# =====================================================================
 # NLIScorer (the real model, with predict() faked)
 # =====================================================================
 

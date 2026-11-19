@@ -200,6 +200,7 @@ class AnswerPipeline:
                         self.grounder,
                         supported_at=explain.supported_threshold,
                         partial_at=explain.partial_threshold,
+                        all_sources=explain.check_all_sources,
                     )
                 trace.set_sentences(sentences)
             except Exception as e:
