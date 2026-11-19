@@ -27,6 +27,7 @@ import streamlit as st
 
 from codesearch.ui.api_client import ApiClient, ApiError
 from codesearch.ui.explain_view import (
+    attribution_rows,
     confidence_badge,
     grounding_note,
     sentence_rows,
@@ -210,6 +211,42 @@ def render_explanation(trace_id: str) -> None:
         st.caption(
             "[n] = the citation number in the answer. Rows without one weren't sent to the model."
         )
+        render_deep_explain(trace_id, trace)
+
+
+def render_deep_explain(trace_id: str, trace: dict[str, Any]) -> None:
+    """Leave-one-out attribution, on demand: which source actually drove the answer."""
+    if trace.get("cache_tier") or trace.get("abstain_reason") or not trace.get("used_chunk_ids"):
+        return  # nothing to attribute: the API would answer 409
+    key = f"deep_{trace_id}"
+    if key not in st.session_state:
+        n = len(trace["used_chunk_ids"])
+        if st.button(
+            "Deep explain",
+            key=f"btn_{trace_id}",
+            icon=":material/science:",
+            help=f"Re-asks the question {n} times, each time without one source, "
+            "to see which source the answer depended on. Slow: ~5 s per source.",
+        ):
+            with st.spinner(f"Re-asking without each of the {n} sources…"):
+                try:
+                    st.session_state[key] = get_client().deep_explain(trace_id)["scores"]
+                except ApiError as e:
+                    st.session_state[key] = {"error": str(e)}
+            st.rerun()
+        return
+
+    result = st.session_state[key]
+    if "error" in result:
+        st.caption(f":orange[:material/warning: {result['error']}]")
+        return
+    st.markdown("**Which source drove the answer**")
+    if not any(result.values()):
+        st.caption("Removing any single source left the answer unchanged.")
+        return
+    for row in attribution_rows(trace, result):
+        st.progress(row["share"], text=f"[{row['n']}] {row['title']} — {row['share']:.0%}")
+    st.caption("Share of the answer that changed when each source was left out.")
 
 
 def render_sidebar() -> None:
