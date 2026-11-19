@@ -27,6 +27,7 @@ Phase: 1
 """
 
 import hashlib
+import re
 from dataclasses import dataclass
 
 from codesearch.ingest.mdx_clean import CleanPage
@@ -41,14 +42,20 @@ class Section:
     path: list[str]
     anchor: str
     lines: list[str]
+    heading: str = ""  # the heading line that opened it (v1 chunks keep it in the text)
 
 
-def split_into_sections(page: CleanPage) -> list[Section]:
-    """Cut a page into sections at #/##/### headings outside code blocks."""
+def split_into_sections(page: CleanPage, *, keep_empty: bool = False) -> list[Section]:
+    """Cut a page into sections at #/##/### headings outside code blocks.
+
+    A heading with no text under it ("## Reference" right before a ###) is dropped
+    unless ``keep_empty`` is set; the v1 baseline needs it.
+    """
     title = [page.title] if page.title else []
     path: list[str] = list(title)
     open_headings: list[tuple[int, str]] = []  # (level, text) of the headings we're under
     anchor: str = ""
+    heading_line: str = ""
     current: list[str] = []
     in_code: bool = False
     sections: list[Section] = []
@@ -68,8 +75,10 @@ def split_into_sections(page: CleanPage) -> list[Section]:
 
         heading = parse_heading(line)
         if heading and heading.level <= 3:
-            if any(ln.strip() for ln in current):
-                sections.append(Section(path=path, anchor=anchor, lines=current))
+            if (keep_empty and heading_line) or any(ln.strip() for ln in current):
+                sections.append(
+                    Section(path=path, anchor=anchor, lines=current, heading=heading_line)
+                )
 
             ## Starting a new section here
             # Close every heading at this level or deeper, then open this one.
@@ -78,12 +87,13 @@ def split_into_sections(page: CleanPage) -> list[Section]:
             open_headings.append((heading.level, heading.text))
             path = title + [text for _, text in open_headings]
             anchor = heading.anchor
+            heading_line = line
             current = []
         else:
             current.append(line)
 
-    if any(ln.strip() for ln in current):
-        sections.append(Section(path=path, anchor=anchor, lines=current))
+    if (keep_empty and heading_line) or any(ln.strip() for ln in current):
+        sections.append(Section(path=path, anchor=anchor, lines=current, heading=heading_line))
 
     return sections
 
@@ -181,35 +191,141 @@ def _split_prose_block(block: str, max_chars: int) -> list[str]:
     return parts
 
 
-def chunk_page_fixed(
-    page: CleanPage, url: str, source_path: str, max_chars: int = 1000
-) -> list[Chunk]:
-    """v1-style chunks: blind ``max_chars`` cuts of the body, no headings, no anchors.
+# ---------------------------------------------------------------------------
+# v1 baseline: the chunking the original v1 app used (vectorstore.py on the v1
+# branch): LangChain's MarkdownHeaderTextSplitter on #/##/### with
+# strip_headers=False, then RecursiveCharacterTextSplitter(chunk_size=1000,
+# chunk_overlap=150). Ported here, quirks included, so the eval can compare v2
+# against what v1 really did without depending on LangChain.
+# ---------------------------------------------------------------------------
 
-    Only used to reproduce the v1 baseline in the eval. Cuts ignore words, lines
-    and code fences on purpose; joining the pieces gives back the body exactly.
+V1_SEPARATORS: tuple[str, ...] = ("\n\n", "\n", " ", "")
+
+
+def v1_section_text(section: Section) -> str:
+    """A section as MarkdownHeaderTextSplitter emitted it.
+
+    Every line is stripped (code indentation included) and loses non-printable
+    characters such as tabs, the heading line is kept,
+    and paragraphs are joined with two spaces and a newline instead of a blank
+    line. Blank lines inside code blocks survive as empty lines.
+    """
+    paragraphs: list[str] = []
+    current: list[str] = []
+    in_code = False
+    for raw in ([section.heading] if section.heading else []) + section.lines:
+        line = "".join(ch for ch in raw.strip() if ch.isprintable())  # drops tabs too
+        if line.startswith("```"):
+            in_code = not in_code
+            current.append(line)
+        elif in_code or line:
+            current.append(line)
+        elif current:
+            paragraphs.append("\n".join(current))
+            current = []
+    if current:
+        paragraphs.append("\n".join(current))
+    return "  \n".join(paragraphs)
+
+
+def _split_keep_start(text: str, separator: str) -> list[str]:
+    """Split on a literal separator, keeping it at the start of the next piece."""
+    if not separator:
+        return list(text)
+    parts = re.split(f"({re.escape(separator)})", text)
+    pieces = [parts[0]] + [parts[i] + parts[i + 1] for i in range(1, len(parts), 2)]
+    return [p for p in pieces if p]
+
+
+def _merge_pieces(pieces: list[str], size: int, overlap: int) -> list[str]:
+    """Greedily pack pieces up to ``size``; start the next chunk with ~``overlap`` chars."""
+    chunks: list[str] = []
+    current: list[str] = []
+    total = 0
+    for piece in pieces:
+        if total + len(piece) > size and current:
+            joined = "".join(current).strip()
+            if joined:
+                chunks.append(joined)
+            # Drop pieces from the front until what's left fits as the overlap.
+            while total > overlap or (total + len(piece) > size and total > 0):
+                total -= len(current.pop(0))
+        current.append(piece)
+        total += len(piece)
+    joined = "".join(current).strip()
+    if joined:
+        chunks.append(joined)
+    return chunks
+
+
+def recursive_split(
+    text: str, size: int, overlap: int, separators: tuple[str, ...] = V1_SEPARATORS
+) -> list[str]:
+    """RecursiveCharacterTextSplitter: try paragraph, line, word, then character cuts."""
+    separator: str = separators[-1]
+    finer: tuple[str, ...] = ()
+    for i, candidate in enumerate(separators):
+        if candidate == "" or candidate in text:
+            separator, finer = candidate, separators[i + 1 :]
+            break
+    out: list[str] = []
+    fitting: list[str] = []
+    for piece in _split_keep_start(text, separator):
+        if len(piece) < size:
+            fitting.append(piece)
+            continue
+        if fitting:
+            out.extend(_merge_pieces(fitting, size, overlap))
+            fitting = []
+        out.extend(recursive_split(piece, size, overlap, finer) if finer else [piece])
+    if fitting:
+        out.extend(_merge_pieces(fitting, size, overlap))
+    return out
+
+
+def chunk_page_v1(
+    page: CleanPage, url: str, source_path: str, max_chars: int = 1000, overlap: int = 150
+) -> list[Chunk]:
+    """v1's chunks: heading split, then a recursive 1,000-char split with 150 overlap.
+
+    Unlike v2 there is no header-path prefix in the text and code blocks can be cut
+    anywhere. The anchor and header path are kept as metadata (v1 kept the headers
+    in metadata too), so the eval can score v1 at section level.
     """
     if max_chars <= 0:
         raise ValueError(f"max_chars must be positive, got {max_chars}")
+    if not 0 <= overlap < max_chars:
+        raise ValueError(f"overlap must be in [0, max_chars), got {overlap}")
 
+    sections = split_into_sections(page, keep_empty=True)
     chunks: list[Chunk] = []
-    body = page.body
-    for index, start in enumerate(range(0, len(body), max_chars)):
-        piece = body[start : start + max_chars]
-        if not piece.strip():
-            continue  # whitespace-only slice: nothing to search
-        # "v1|" keeps these ids apart from v2 ids for the same page
-        chunk_id = hashlib.sha256(f"v1|{url}|{index}|{piece}".encode()).hexdigest()
-        chunks.append(
-            Chunk(
-                id=chunk_id,
-                url=url,
-                anchor="",
-                title=page.title,
-                header_path=(),
-                text=piece,
-                source_path=source_path,
-                start_line=0,
+    pending = ""  # a heading-only section waiting to be glued onto the next one
+    for i, section in enumerate(sections):
+        text = v1_section_text(section)
+        if pending:
+            text = f"{pending}  \n{text}"
+            pending = ""
+        following = sections[i + 1] if i + 1 < len(sections) else None
+        heading_only = not any(ln.strip() for ln in section.lines)
+        if heading_only and following and len(following.path) > len(section.path):
+            # LangChain appends a lone heading to the deeper section after it.
+            pending = text
+            continue
+        for index, piece in enumerate(recursive_split(text, max_chars, overlap)):
+            # "v1|" keeps these ids apart from v2 ids for the same text
+            chunk_id = hashlib.sha256(
+                f"v1|{url}|{section.anchor}|{index}|{piece}".encode()
+            ).hexdigest()
+            chunks.append(
+                Chunk(
+                    id=chunk_id,
+                    url=url,
+                    anchor=section.anchor,
+                    title=page.title,
+                    header_path=tuple(section.path),
+                    text=piece,
+                    source_path=source_path,
+                    start_line=0,
+                )
             )
-        )
     return chunks

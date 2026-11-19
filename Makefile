@@ -20,7 +20,8 @@ eval:
 
 # Every config, then the README table. A failing config is reported and skipped, so one
 # bad model download doesn't stop the rest. v1.yaml needs its own index first:
-#   CODESEARCH_INDEX__CHUNK_STRATEGY=v1 CODESEARCH_INDEX__INDEX_DIR=index/v1 uv run codesearch ingest
+#   CODESEARCH_INDEX__CHUNK_STRATEGY=v1 CODESEARCH_INDEX__CHUNK_OVERLAP=150 \
+#   CODESEARCH_INDEX__INDEX_DIR=index/v1 uv run codesearch ingest
 ablation:
 	@failed=""; for config in eval/configs/*.yaml; do \
 		uv run python -m eval.run_eval "$$config" || failed="$$failed $$config"; \

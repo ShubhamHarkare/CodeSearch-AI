@@ -71,7 +71,7 @@ class AnswerPipeline:
         embedder: Embedder | None = None,
     ) -> None:
         self.handle = handle
-        self.retriver = retriever
+        self.retriever = retriever
         self.reranker = reranker
         self.llm = llm
         self.answer_prompt = answer_prompt
@@ -102,9 +102,7 @@ class AnswerPipeline:
             model=self.settings.llm.model,
         )
 
-        # HACK: The below code is for condensing the history and the new question
-        # HACK: So that we can get the history and the record time for that
-
+        # A follow-up question is rewritten into a standalone one before retrieval.
         if history:
             with trace.time("condense"):
                 search_q = await condense(
@@ -127,18 +125,10 @@ class AnswerPipeline:
         if cache is not None and (hit := cache.get(key)) is not None:
             trace.set_used_ids([c.chunk_id for c in hit.citations])
             return self._replay(hit, "exact", trace, pipeline_start)
-        # HACK: This is for retrieval
-        # t0 = time.perf_counter()
-        # raw_chunks = self.retriver.retrieve(search_q)
 
-        # chunks = self.reranker.rerank(
-        #     search_q,
-        #     raw_chunks,
-        #     self.settings.retrieval.rerank_top_n,  # how many chunks go to the LLM
-        # )
-        # timings["retrieval_ms"] = (time.perf_counter() - t0) * 1000.0
+        # Retrieve candidates, then rerank and keep rerank_top_n for the prompt.
         with trace.time("retrieval"):
-            raw_chunks = self.retriver.retrieve(search_q)
+            raw_chunks = self.retriever.retrieve(search_q)
             trace.add_candidates(raw_chunks)
             chunks = self.reranker.rerank(
                 search_q, raw_chunks, self.settings.retrieval.rerank_top_n
@@ -167,15 +157,11 @@ class AnswerPipeline:
         }
         if cache is not None and (hit := cache.lookup_similar(search_q, **similar)) is not None:
             cache.set(key, hit)
-            trace.set_used_ids([c.chunk_id for c in hit.citations])  # NEW
+            trace.set_used_ids([c.chunk_id for c in hit.citations])
             return self._replay(hit, "semantic", trace, pipeline_start)
 
-        # HACK if we do not abstain and get the answer then this is the code for that
-        # t0 = time.perf_counter()
-        # prompt = self.answer_prompt.render(context=format_context(chunks), question=search_q)
-        # raw = await self.llm.generate(prompt, system=self.answer_prompt.system)
-        # timings["generation_ms"] = (time.perf_counter() - t0) * 1000.0
-        trace.set_used(chunks)  # NEW
+        # Cache miss: record what the prompt will see, then generate.
+        trace.set_used(chunks)
         bm25 = self.handle.snapshot().bm25
         trace.set_matched_terms(
             {c.chunk.id: bm25.term_contributions(search_q, c.chunk.id) for c in chunks}
@@ -184,11 +170,11 @@ class AnswerPipeline:
             prompt = self.answer_prompt.render(context=format_context(chunks), question=search_q)
             raw = await self.llm.generate(prompt, system=self.answer_prompt.system)
 
-        # Step 9: Process citations
+        # Drop [n] markers that point past the context, then map the rest to sources.
         text, _removed = strip_invalid(raw, len(chunks))
         citations = to_citations(text, chunks)
 
-        # Step 10: Model refusal check
+        # The prompt tells the model to say this phrase when the context doesn't cover it.
         abstained = False
         if "isn't covered in the React docs" in text and not citations:
             abstained = True
@@ -219,7 +205,6 @@ class AnswerPipeline:
         if self.calibrator is not None and not abstained:
             confidence = self.calibrator.confidence(features(chunks, groundedness))
 
-        # Step 11: Return completed Answer with total timing
         answer = self._finish(
             trace,
             pipeline_start,
@@ -229,7 +214,8 @@ class AnswerPipeline:
             groundedness=groundedness,
             confidence=confidence,
         )
-        if self.cache is not None and not abstained:  # unchanged
+        # Only real answers are cached; a refusal is recomputed next time.
+        if self.cache is not None and not abstained:
             self.cache.set(key, answer)
             self.cache.add_similar(search_q, answer, **similar)
         return answer

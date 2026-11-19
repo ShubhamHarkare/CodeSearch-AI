@@ -1,47 +1,82 @@
 # CodeSearch AI
 
-Question answering over the [React documentation](https://react.dev), with sources you can
-check and an honest "I don't know" when the docs don't cover the question. Runs fully
-locally: a local LLM through [Ollama](https://ollama.com), no API keys.
+Question answering over the [React documentation](https://react.dev) that shows its work.
+Every answer comes with sources you can check, a sentence-by-sentence support check, a
+calibrated confidence score and a trace of how it was produced; questions the docs don't
+cover get an honest "I don't know". Runs fully locally: a 4B model through
+[Ollama](https://ollama.com), no API keys.
 
 Ask *"How do I update state based on the previous state?"* and you get a short answer whose
-`[n]` markers link to the exact doc sections it came from. Ask *"What's the capital of
-France?"* and it declines instead of guessing.
+`[n]` markers link to the doc sections it came from. Ask *"What's the capital of France?"*
+and it declines without calling the model.
 
 ## What it does
 
-- **Retrieval you can measure.** 4,858 section-aware chunks from react.dev, embedded with
-  `bge-small-en-v1.5`. Dense, BM25, hybrid (RRF) and cross-encoder reranking are all
-  implemented; dense won the ablation below and is the default.
-- **Abstains on off-topic questions.** A score threshold tuned on the golden set declines
-  91.7% of out-of-scope questions while wrongly declining 12.7% of real ones. No LLM call
-  is made when it abstains.
-- **Citations that point somewhere real.** Invalid `[n]` markers are stripped; every kept
-  marker maps to a react.dev URL.
-- **Follow-up questions.** "what about objects?" is rewritten into a standalone question
-  using the chat history before retrieval.
-- **Two-tier cache.** Exact matches in Redis (in-memory fallback if Redis is down) plus a
-  semantic tier for paraphrases. Keys include the index, prompt and model versions, so a
-  new build never serves stale answers.
-- **Explains every answer.** Each answer has a trace: what was searched, every candidate
-  source with its dense / BM25 / rerank scores and matched query words, and timings
-  (`GET /v1/explain/{trace_id}`, the "Why this answer?" panel in the UI).
-- **Checks its own sentences.** An NLI model tests each answer sentence against the source
-  it cites; unsupported sentences are flagged in the UI.
-- **Says how confident it is, and that confidence is checked.** A calibrated score from
-  retrieval strength and groundedness, shown as a high / medium / low badge.
-- **An eval gate in CI.** Every push re-runs retrieval on the golden set and fails if a
-  metric drops past its tolerance.
+- **Retrieves from 4,858 heading-aware chunks** of react.dev, embedded with
+  `bge-small-en-v1.5`. Dense, BM25, hybrid (RRF) and two cross-encoder rerankers are
+  implemented and compared on a golden set; dense won and is the default.
+- **Abstains on off-topic questions.** If the best retrieval score is below a threshold it
+  answers "I don't know" without calling the LLM: 92% of out-of-scope questions are
+  declined, at the cost of declining 13% of answerable ones.
+- **Cites real sources.** Invalid `[n]` markers are stripped; every kept marker maps to a
+  react.dev URL.
+- **Handles follow-ups.** "what about objects?" is rewritten into a standalone question
+  from the chat history before retrieval and caching.
+- **Caches in two tiers.** Exact matches in Redis (falls back to memory when Redis is down)
+  plus a semantic tier for paraphrases that must also retrieve the same top chunk. Keys
+  include the index, prompt and model versions, so a rebuild never serves stale answers.
+- **Explains every answer** (next section).
+- **Gates merges on quality.** CI re-runs retrieval on the golden set and blocks a PR to
+  `main` if a metric drops past its tolerance.
+
+## Explainability
+
+| Question a user has | What answers it | Where |
+|---|---|---|
+| Why these sources? | A trace per answer: the standalone question, every candidate with its dense / BM25 / rerank scores, the query words each source matched, timings per step | `GET /v1/explain/{trace_id}`, "Why this answer?" in the UI |
+| Is each sentence backed by its source? | An NLI model (`nli-deberta-v3-base`) scores each sentence against the source it cites: supported, partial or unsupported | Inline in the answer; `groundedness` on the response |
+| How much should I trust this answer? | A calibrated probability from retrieval strength and groundedness, shown as a high / medium / low badge | `confidence` on the response |
+| Which source did the answer depend on? | Leave-one-out: regenerate without each source and measure how far the answer moves (1 − cosine of embeddings), normalised to shares | `POST /v1/explain/{trace_id}/deep`, "Deep explain" in the UI (k extra LLM calls, so on demand only) |
+
+Traces are stored in SQLite, so any answer can be explained after the fact.
+
+## How a request flows
+
+```mermaid
+flowchart TD
+    UI[Streamlit UI] -->|POST /v1/ask| API[FastAPI: trace id middleware]
+    API --> C[Condense follow-up]
+    C --> K{Exact cache}
+    K -.->|hit| OUT[Response]
+    K -->|miss| R[Retrieve: dense bge-small, Chroma]
+    R --> RR[Rerank / keep top 3]
+    RR --> A{Top score below threshold?}
+    A -.->|yes: I don't know, no LLM call| OUT
+    A -->|no| S{Semantic cache}
+    S -.->|hit| OUT
+    S -->|miss| L[Prompt v3 → Ollama gemma3:4b]
+    L --> CI[Validate citations]
+    CI --> G[Groundedness: NLI per sentence]
+    G --> CF[Confidence: calibrated]
+    CF --> T[(Trace store, SQLite)]
+    T --> OUT
+```
+
+The pipeline is assembled in `codesearch/factory.py`, the only place that chooses
+implementations; everything else receives its collaborators through Protocols, so the
+test suite swaps in a fake LLM and a hash embedder and runs with no model or network.
 
 ## Results
 
-Retrieval ablation on 79 hand-written questions: 55 answerable from the docs and 24 that
-are not (general knowledge, other frontend frameworks, the React ecosystem).
+### Retrieval
+
+Ablation on 79 hand-written questions: 55 answerable from the docs and 24 that are not
+(general knowledge, other frontend frameworks, the React ecosystem).
 
 <!-- ablation:start -->
 | Config | What it does | R@1 | R@5 | MRR | nDCG@10 | Page hit@5 | Page MRR | Pool recall | OOS abstain | False abstain |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| v1 | v1-style chunking + dense top-3 (baseline) | n/a | n/a | n/a | n/a | 0.855 | 0.721 | n/a | **0.917** | 0.164 |
+| v1 | v1 chunking (headings, then 1,000-char recursive split, 150 overlap) + dense top-10 | 0.330 | 0.648 | 0.556 | 0.569 | 0.873 | 0.705 | 0.745 | 0.833 | 0.109 |
 | bm25 | v2 chunking + BM25 top-10 | 0.188 | 0.479 | 0.379 | 0.405 | 0.836 | 0.642 | 0.567 | n/a | n/a |
 | **dense** (default) | v2 chunking + dense top-10 | **0.345** | 0.673 | **0.574** | **0.585** | 0.982 | **0.784** | 0.752 | **0.917** | 0.127 |
 | hybrid | v2 chunking + BM25/dense fused with RRF | 0.318 | 0.612 | 0.554 | 0.553 | 0.927 | 0.746 | **0.915** | **0.917** | 0.127 |
@@ -49,32 +84,36 @@ are not (general knowledge, other frontend frameworks, the React ecosystem).
 | hybrid_rerank | hybrid RRF candidates + cross-encoder rerank | 0.282 | 0.636 | 0.540 | 0.557 | **1.000** | 0.729 | **0.915** | 0.875 | **0.018** |
 | hybrid_rerank_bge | hybrid RRF candidates + bge-reranker-base | 0.279 | 0.615 | 0.497 | 0.527 | 0.909 | 0.680 | **0.915** | 0.875 | 0.055 |
 
-55 in-scope questions + 24 out-of-scope from `eval/golden.jsonl`. Best value per column in bold. n/a = not measured, or not comparable (v1 chunks have no section anchors, so compare v1 on the page columns).
+55 in-scope questions + 24 out-of-scope from `eval/golden.jsonl`. Best value per column in bold. n/a = not measured for that config.
 <!-- ablation:end -->
 
-What the table says:
+What the table says, and how far to trust it:
 
-- **v1 → v2 chunking** is the biggest win: splitting by headings instead of every 1,000
-  characters puts the right *page* in the top 5 for 98% of questions instead of 86%.
-- **Dense beats hybrid.** BM25 alone is weak on paraphrased questions; fusing it in widens
-  the candidate pool but pushes the best match down the list.
-- **Rerankers raise R@5 but lower R@1 and MRR.** The candidate pool already contains the
-  answer ~90% of the time (pool recall), so ordering, not recall, is the bottleneck, and
-  a MS MARCO cross-encoder doesn't order React docs better than the embedder does. The
-  larger `bge-reranker-base` is worse than MiniLM on every ranking metric.
-- **But rerankers are much better at abstaining.** Cross-encoder scores separate React
-  questions from off-topic ones far more cleanly than embedding similarity: with
-  `hybrid_rerank`, only 1.8% of real questions are wrongly declined, against 12.7% with
-  dense. Dense stays the default for ranking quality; a reranker as the abstain signal is
-  the next thing to try.
+- **Dense beats hybrid and the rerankers on ranking** (R@1, MRR, nDCG). BM25 is weak on
+  paraphrased questions, and fusing it in widens the candidate pool but pushes the best
+  match down. The larger `bge-reranker-base` is worse than MiniLM on every ranking metric.
+- **The candidate pool is not the bottleneck; ordering is.** Pool recall is ~0.9 with
+  hybrid, but R@1 stays near 0.3: the right section is usually retrieved, not ranked first.
+- **These differences are small.** With 55 in-scope questions, one question moves MRR by
+  about 0.02, so dense vs hybrid (0.574 vs 0.554) is roughly one question. Confidence
+  intervals and a larger golden set are next.
+- **v1 → v2 chunking helps you find the right page, not the right section.** The v1 row
+  re-implements the original app's chunking (heading split, then a recursive 1,000-char
+  split with 150 overlap) and keeps everything else equal to `dense`. v2 puts the right
+  page in the top 5 for 98% of questions vs 87% (6 more of 55), but section-level R@1,
+  R@5 and MRR move by about one question. A likely reason: v2 starts every chunk with its
+  "Page > Section" path, so the embedding knows which page it came from.
+- **Abstention numbers are optimistic.** The threshold (0.755) was tuned on the same 24
+  out-of-scope questions it is reported on, and the same value is applied to every row,
+  so v1 and the reranker rows sit at different operating points. Their
+  lower false-abstain rate is a lead to follow up, not a like-for-like win.
 
-Metrics: section-level recall@k, MRR and nDCG@10 against the labelled section anchors;
-page-level variants for comparison with v1, whose chunks have no anchors.
+Metrics: section-level recall@k, MRR and nDCG@10 against labelled section anchors, plus
+page-level hit@5 and MRR.
 
-## Answer quality
+### Answer quality
 
-Retrieval is half the story; the other half is whether the answers are right. The
-answer eval asks all 79 golden questions through the full pipeline (gemma3:4b via
+The answer eval asks all 79 golden questions through the full pipeline (gemma3:4b via
 Ollama, NLI judge `nli-deberta-v3-base`) and checks every sentence against its source:
 
 | Metric | Value | |
@@ -96,63 +135,37 @@ How it got there, one change at a time (first 10 questions):
 | Eval fix: a lone trailing `[3]` was being graded as a sentence | 0.48 | 0.68 | 5.6 s |
 | NLI judge `deberta-v3-small` → `deberta-v3-base` | 0.63 | 0.68 | 6.6 s |
 
-The dip in row 2 was the eval, not the answers: the answers got shorter and more on
-topic, but each one ended with a stray citation that counted as an unsupported claim.
-The judge swap mattered most: the small model scored near-verbatim quotes of the docs as
-unsupported (long, markdown-heavy premises), which also hid real mis-citations.
+The dip in row 2 was the eval, not the answers: each answer ended with a stray citation
+that counted as an unsupported claim. The judge swap mattered most: the small model
+scored near-verbatim quotes of the docs as unsupported, which also hid real mis-citations.
+The judge is itself a model; comparing it with an LLM judge and hand labels is on the
+roadmap.
 
 ### Confidence
 
 A logistic regression over three features (top retrieval score, mean of the top 3,
-groundedness) predicts whether an answer is good (cites a right page and is at least
-half grounded). Checked out-of-fold, so no answer is scored by a model that saw it:
+groundedness) predicts whether an answer is good (cites a right page and is at least half
+grounded). Checked out-of-fold, so no answer is scored by a model that saw it:
 
 ![Reliability diagram](docs/reliability.png)
 
-On the 48 answered questions, low-confidence answers were never good, and
-high-confidence answers were good 79% of the time. ECE is 0.13; with ~50 answers a single
-answer moves a bin by up to 50%, so read the bins together with their `n`. More golden
-questions are the main way to tighten it.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    UI[Streamlit UI] -->|HTTP| API[FastAPI]
-    API --> P[AnswerPipeline]
-    P --> C{Condense<br/>follow-up?}
-    C --> K{Exact cache}
-    K -->|miss| R[Retrieve<br/>dense / BM25 / hybrid]
-    R --> RR[Rerank / cut]
-    RR --> A{Abstain?}
-    A -->|no| S{Semantic cache}
-    S -->|miss| L[Prompt → Ollama]
-    L --> CI[Validate citations]
-    CI --> P
-    K -.->|hit| P
-    S -.->|hit| P
-    A -.->|yes| P
-    R --- IDX[(Chroma + BM25<br/>index)]
-    K --- RD[(Redis)]
-```
-
-The pipeline is assembled in `codesearch/factory.py`, the only place that chooses
-implementations; everything else receives its collaborators, so tests swap in a fake
-LLM and a hash embedder and run in seconds.
+On the 48 answered questions, low-confidence answers were never good and high-confidence
+answers were good 79% of the time. ECE is 0.13; with ~50 answers a single answer moves a
+bin by up to 50%, so read the bins together with their `n`.
 
 ## Quick start
 
-Needs Python 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com) and
-Docker (for Redis, optional).
+Needs Python 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com) and,
+optionally, Docker for Redis.
 
 ```bash
 make setup                    # uv sync --all-extras + pre-commit
-cp .env.example .env
+cp .env.example .env          # every variable is documented there
 ollama pull gemma3:4b         # any local model works; set CODESEARCH_LLM__MODEL
-make ingest                   # fetch react.dev at a pinned commit and build the index
+make ingest                   # fetch react.dev at a pinned commit, build the index
 docker compose up -d redis    # optional: without it the cache falls back to memory
 
-make serve                    # API on http://localhost:8000 (docs at /docs)
+make serve                    # API on http://localhost:8000 (OpenAPI docs at /docs)
 make ui                       # chat UI on http://localhost:8501
 ```
 
@@ -170,14 +183,14 @@ uv run python -m eval.fit_calibrator results/answers_dense.json   # -> models/ca
 uv run python -m eval.plot_reliability                           # -> docs/reliability.png
 ```
 
-- `eval/golden.jsonl`: the 79 questions, each with the doc sections that answer it (or
-  marked out-of-scope by category).
+- `eval/golden.jsonl`: the 79 questions, each with the doc sections that answer it, or
+  marked out-of-scope by category.
 - `eval/run_eval.py`: runs one config, writes `results/<name>.json` and logs to MLflow.
-- `eval/compare.py`: compares a run against `eval/baseline.json`; the
+- `eval/compare.py`: compares a run against `eval/baseline.json`. The
   [eval-gate](.github/workflows/eval-gate.yml) workflow posts the comparison on PRs and
   fails on a regression (tolerance 0.02 for retrieval metrics, 0.05 for abstention).
 - `eval/answer_eval.py`: the end-to-end answer eval; also writes one row per graded
-  sentence to `results/sentences_<name>.csv`, with a blank column for hand labels.
+  sentence to `results/sentences_<name>.csv` for hand labelling.
 - `eval/fit_calibrator.py`: fits and checks the confidence model.
 
 ## Project layout
@@ -188,11 +201,12 @@ codesearch/
   retrieval/    dense / BM25 / hybrid (RRF), rerankers, abstain, condense
   generation/   versioned prompts, Ollama client, citation validation
   cache/        keys, LRU, Redis exact cache, semantic cache, tiered cache
-  api/          FastAPI app: /v1/ask, /healthz, /readyz, /v1/index
+  explain/      traces, groundedness (NLI), calibration, leave-one-out attribution
+  api/          FastAPI app: /v1/ask, /v1/explain, /healthz, /readyz, /v1/index
   ui/           Streamlit app + the HTTP client it uses
   pipeline.py   the query path, step by step
-eval/           golden set, metrics, runner, regression gate, ablation table
-prompts/        answer.yaml, condense.yaml (versioned, fingerprinted)
+eval/           golden set, metrics, runners, regression gate, ablation table
+prompts/        answer.yaml, condense.yaml (versioned, fingerprinted in tests)
 tests/          unit + integration tests (pytest; no model or network needed)
 ```
 
@@ -201,14 +215,33 @@ make test                     # the full suite
 make lint                     # ruff + ruff format + mypy --strict
 ```
 
-## Roadmap
+## Limitations
 
-- **Explainability, still to come:** leave-one-out attribution ("which source drove this
-  answer?"), splitting long sources into windows for the NLI judge, and automatic repair
-  of mis-cited sentences.
-- **Streaming** answers over SSE, incremental re-indexing when the docs change, user
-  feedback.
-- **Deployment:** Docker images, Prometheus metrics and drift monitoring.
+- **Small, single-author golden set** (55 + 24 questions). Enough to catch regressions in
+  CI, not to claim general accuracy.
+- **A 4B local model.** Chosen for cost and privacy; answers are slower (~6 s) and weaker
+  than a hosted model would give. The model is one config value.
+- **Synchronous work on the event loop.** Embedding, Chroma, reranking and Redis calls are
+  blocking inside an async handler, and identical concurrent questions each call the LLM.
+- **The semantic cache is per process**: in memory, lost on restart, not shared between
+  workers, and its 0.95 threshold has not been evaluated for false hits.
+- **No streaming yet**: answers arrive whole.
+
+## Status and roadmap
+
+Phases 1 (retrieval, eval, API, UI) and 2 (explainability) are complete. These are
+scaffolding for Phase 3 and are **not implemented yet**: `codesearch/monitoring/`,
+`codesearch/api/sse.py`, `codesearch/api/background.py`, `deploy/`, `make up`, and the
+`nightly-eval` and `release` workflows.
+
+Next:
+
+- **Evaluation:** a fair v1 baseline, bootstrap confidence intervals, a held-out split for
+  the abstain threshold with one threshold per score kind, and a larger golden set.
+- **Serving:** move blocking calls off the event loop, single-flight per cache key, the
+  semantic cache in Redis, SSE streaming, and a committed load-test script.
+- **Deployment:** a multi-stage Docker image, a compose stack, Prometheus metrics and
+  drift monitoring.
 
 ## Author
 

@@ -1,19 +1,26 @@
-"""Tests for the v1-style chunker (the baseline) and the chunk_strategy setting.
+"""Tests for the v1 chunker (the eval baseline) and the chunk_strategy setting.
 
-v1 cut the docs into fixed 1,000-character pieces with no headings and no
-anchors. We reproduce that on purpose so the eval can measure what v2's
-heading-aware chunking is worth. These tests pin the "dumb" behaviour down.
+v1 (vectorstore.py on the v1 branch) used LangChain's MarkdownHeaderTextSplitter
+on #/##/### with strip_headers=False, then RecursiveCharacterTextSplitter(1000,
+150). chunker.py ports both, quirks included. The pinned example below was
+produced by LangChain itself, so the port can't drift from what v1 really did.
 """
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from codesearch.config import IndexSettings, Settings
-from codesearch.ingest.chunker import chunk_page, chunk_page_fixed
+from codesearch.ingest.chunker import (
+    chunk_page,
+    chunk_page_v1,
+    recursive_split,
+    split_into_sections,
+)
 from codesearch.ingest.manifest import ChunkParams, compute_index_version
 from codesearch.ingest.mdx_clean import CleanPage, clean_mdx
 
@@ -25,71 +32,125 @@ def page(body: str, title: str = "useState") -> CleanPage:
     return CleanPage(title=title, body=body)
 
 
+def texts(body: str, max_chars: int = 1000, overlap: int = 150) -> list[str]:
+    return [c.text for c in chunk_page_v1(page(body), URL, SRC, max_chars, overlap)]
+
+
 def mini_page(mini_corpus_path: Path, rel: str) -> CleanPage:
     return clean_mdx((mini_corpus_path / rel).read_text(encoding="utf-8"))
 
 
 # =====================================================================
-# Cutting
+# Matches LangChain
+# =====================================================================
+
+PINNED_BODY = (
+    "Intro line.\n\n## Reference {/*reference*/}\n\n### `useState(initial)` {/*usestate*/}\n\n"
+    "Call useState at the top level of your component to declare a state variable that "
+    "React keeps between renders.\n\n"
+    "```js\nfunction Counter() {\n\tconst [count, setCount] = useState(0);\n\n"
+    "  return count;\n}\n```\n\n"
+    "## Usage {/*usage*/}\n\nAdding state to a component. Updating state based on the previous "
+    "state. Avoiding recreating the initial state.\n"
+)
+
+# Output of LangChain's two splitters (chunk_size=120, chunk_overlap=30) on PINNED_BODY.
+PINNED_LANGCHAIN = [
+    "Intro line.",
+    "## Reference {/*reference*/}  \n### `useState(initial)` {/*usestate*/}",
+    (
+        "Call useState at the top level of your component to declare a state variable that "
+        "React keeps between renders.  \n```js"
+    ),
+    "```js\nfunction Counter() {\nconst [count, setCount] = useState(0);",
+    "return count;\n}\n```",
+    "## Usage {/*usage*/}",
+    (
+        "Adding state to a component. Updating state based on the previous state. "
+        "Avoiding recreating the initial state."
+    ),
+]
+
+
+def test_matches_langchain_on_the_pinned_example() -> None:
+    assert texts(PINNED_BODY, max_chars=120, overlap=30) == PINNED_LANGCHAIN
+
+
+# =====================================================================
+# Section text (MarkdownHeaderTextSplitter)
 # =====================================================================
 
 
-def test_cuts_into_fixed_size_pieces() -> None:
-    chunks = chunk_page_fixed(page("a" * 2500), URL, SRC, max_chars=1000)
-    assert [len(c.text) for c in chunks] == [1000, 1000, 500]
+def test_heading_line_is_kept_and_no_path_prefix_is_added() -> None:
+    assert texts("## Usage {/*usage*/}\n\nAdd state.") == ["## Usage {/*usage*/}  \nAdd state."]
 
 
-def test_body_exactly_max_chars_is_one_chunk() -> None:
-    assert len(chunk_page_fixed(page("x" * 1000), URL, SRC, max_chars=1000)) == 1
+def test_paragraphs_are_joined_with_two_spaces_and_a_newline() -> None:
+    assert texts("one\ntwo\n\nthree") == ["one\ntwo  \nthree"]
 
 
-def test_one_char_over_max_makes_a_second_chunk() -> None:
-    chunks = chunk_page_fixed(page("x" * 1001), URL, SRC, max_chars=1000)
-    assert [c.text for c in chunks] == ["x" * 1000, "x"]
+def test_lines_are_stripped_and_lose_tabs() -> None:
+    assert texts("```js\n    indented\n\tx\ty\n```") == ["```js\nindented\nxy\n```"]
 
 
-def test_cuts_ignore_words_and_lines() -> None:
-    """v1 split blindly: a cut can land in the middle of a word."""
-    chunks = chunk_page_fixed(page("hello world"), URL, SRC, max_chars=4)
-    assert [c.text for c in chunks] == ["hell", "o wo", "rld"]
+def test_heading_only_section_is_glued_onto_the_deeper_one_after_it() -> None:
+    assert texts("## A {/*a*/}\n### B {/*b*/}\ntext") == ["## A {/*a*/}  \n### B {/*b*/}\ntext"]
 
 
-def test_pieces_join_back_into_the_body(mini_corpus_path: Path) -> None:
-    body = mini_page(mini_corpus_path, SRC).body
-    chunks = chunk_page_fixed(page(body), URL, SRC, max_chars=1000)
-    assert "".join(c.text for c in chunks) == body
+def test_heading_only_section_stands_alone_before_a_sibling() -> None:
+    assert texts("## A\n## B\ntext") == ["## A", "## B\ntext"]
 
 
-def test_whitespace_only_pieces_are_dropped() -> None:
-    chunks = chunk_page_fixed(page("abcd" + " " * 4 + "efgh"), URL, SRC, max_chars=4)
-    assert [c.text for c in chunks] == ["abcd", "efgh"]
+def test_v2_sections_still_drop_heading_only_sections() -> None:
+    sections = split_into_sections(page("## A\n### B\ntext"))
+    assert [s.path for s in sections] == [["useState", "A", "B"]]
+
+
+# =====================================================================
+# Size split (RecursiveCharacterTextSplitter)
+# =====================================================================
+
+
+def test_text_without_separators_falls_back_to_characters_with_overlap() -> None:
+    assert [len(p) for p in recursive_split("a" * 2500, 1000, 150)] == [1000, 1000, 800]
+
+
+def test_words_are_packed_and_overlap() -> None:
+    assert recursive_split("one two three four five six", 10, 4) == [
+        "one two",
+        "two three",
+        "four five",
+        "six",
+    ]
+
+
+def test_long_sections_are_cut_with_overlap() -> None:
+    body = "\n".join(f"line {i} " + "word " * 20 for i in range(40))
+    chunks = texts(body)
+    assert len(chunks) > 1
+    assert all(len(c) <= 1000 for c in chunks)
+    for first, second in pairwise(chunks):
+        assert second.split("\n")[0] in first  # the next chunk starts inside the previous one
+
+
+def test_code_blocks_can_be_cut_unlike_v2(mini_corpus_path: Path) -> None:
+    """The point of the baseline: v1 splits code examples; v2 never does."""
+    p = mini_page(mini_corpus_path, SRC)
+    broken_v1 = sum(c.text.count("```") % 2 for c in chunk_page_v1(p, URL, SRC, max_chars=300))
+    broken_v2 = sum(c.text.count("```") % 2 for c in chunk_page(p, URL, SRC, max_chars=300))
+    assert broken_v1 > 0
+    assert broken_v2 == 0
+
+
+@pytest.mark.parametrize(("max_chars", "overlap"), [(0, 0), (-1, 0), (100, 100), (100, -1)])
+def test_bad_sizes_are_rejected(max_chars: int, overlap: int) -> None:
+    with pytest.raises(ValueError):
+        chunk_page_v1(page("abc"), URL, SRC, max_chars=max_chars, overlap=overlap)
 
 
 @pytest.mark.parametrize("body", ["", "   ", "\n\n\t"])
 def test_empty_body_gives_no_chunks(body: str) -> None:
-    assert chunk_page_fixed(page(body), URL, SRC) == []
-
-
-@pytest.mark.parametrize("max_chars", [0, -1])
-def test_max_chars_must_be_positive(max_chars: int) -> None:
-    with pytest.raises(ValueError):
-        chunk_page_fixed(page("abc"), URL, SRC, max_chars=max_chars)
-
-
-def test_default_max_chars_is_1000() -> None:
-    chunks = chunk_page_fixed(page("y" * 1500), URL, SRC)
-    assert [len(c.text) for c in chunks] == [1000, 500]
-
-
-def test_it_can_break_code_fences_like_v1_did(mini_corpus_path: Path) -> None:
-    """The point of the baseline: blind cuts split code blocks (v2 never does)."""
-    p = mini_page(mini_corpus_path, SRC)
-    v1 = chunk_page_fixed(p, URL, SRC, max_chars=1000)
-    v2 = chunk_page(p, URL, SRC, max_chars=1000)
-    broken_v1 = sum(c.text.count("```") % 2 for c in v1)
-    broken_v2 = sum(c.text.count("```") % 2 for c in v2)
-    assert broken_v1 > 0
-    assert broken_v2 == 0
+    assert chunk_page_v1(page(body), URL, SRC) == []
 
 
 # =====================================================================
@@ -97,44 +158,34 @@ def test_it_can_break_code_fences_like_v1_did(mini_corpus_path: Path) -> None:
 # =====================================================================
 
 
-def test_chunks_have_no_anchor_and_no_header_path(mini_corpus_path: Path) -> None:
-    chunks = chunk_page_fixed(mini_page(mini_corpus_path, SRC), URL, SRC)
+def test_chunks_carry_anchor_and_header_path_as_metadata(mini_corpus_path: Path) -> None:
+    chunks = chunk_page_v1(mini_page(mini_corpus_path, SRC), URL, SRC)
     assert chunks
+    assert any(c.anchor for c in chunks)  # section-level metrics work for v1 too
     for c in chunks:
-        assert c.anchor == ""
-        assert c.header_path == ()
         assert c.url == URL
         assert c.source_path == SRC
         assert c.title == "useState"
+        assert c.header_path[0] == "useState"
+        assert not c.text.startswith("useState > ")
 
 
-def test_no_header_prefix_is_added() -> None:
-    """v2 starts each chunk with 'Title > Section'; v1 must not."""
-    chunks = chunk_page_fixed(page("plain body text"), URL, SRC)
-    assert [c.text for c in chunks] == ["plain body text"]
-
-
-def test_ids_are_unique_within_a_page() -> None:
-    chunks = chunk_page_fixed(page("same" * 300), URL, SRC, max_chars=4)
-    assert len({c.id for c in chunks}) == len(chunks)
-
-
-def test_ids_are_stable_across_runs(mini_corpus_path: Path) -> None:
+def test_ids_are_unique_and_stable(mini_corpus_path: Path) -> None:
     p = mini_page(mini_corpus_path, SRC)
-    first = [c.id for c in chunk_page_fixed(p, URL, SRC)]
-    second = [c.id for c in chunk_page_fixed(p, URL, SRC)]
-    assert first == second
+    first = [c.id for c in chunk_page_v1(p, URL, SRC)]
+    assert len(set(first)) == len(first)
+    assert first == [c.id for c in chunk_page_v1(p, URL, SRC)]
 
 
 def test_ids_depend_on_the_url() -> None:
-    a = chunk_page_fixed(page("text"), URL, SRC)
-    b = chunk_page_fixed(page("text"), "https://react.dev/learn", SRC)
+    a = chunk_page_v1(page("text"), URL, SRC)
+    b = chunk_page_v1(page("text"), "https://react.dev/learn", SRC)
     assert a[0].id != b[0].id
 
 
 def test_v1_and_v2_ids_never_collide(mini_corpus_path: Path) -> None:
     p = mini_page(mini_corpus_path, SRC)
-    v1 = {c.id for c in chunk_page_fixed(p, URL, SRC)}
+    v1 = {c.id for c in chunk_page_v1(p, URL, SRC)}
     v2 = {c.id for c in chunk_page(p, URL, SRC)}
     assert v1.isdisjoint(v2)
 

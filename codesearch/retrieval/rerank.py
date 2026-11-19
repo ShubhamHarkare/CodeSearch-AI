@@ -74,9 +74,6 @@ class CrossEncoderReranker:
         scores = self._score(pairs)
 
         if len(scores) != len(chunks):
-            raise ValueError
-
-        if len(scores) != len(chunks):
             raise ValueError(f"scorer returned {len(scores)} scores for {len(chunks)} chunks")
 
         # Sort positions by score, best first. sorted() is stable, so ties keep input order.

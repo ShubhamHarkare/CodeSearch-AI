@@ -33,7 +33,7 @@ from codesearch.config import Settings
 from codesearch.index.bm25 import BM25Index
 from codesearch.index.handle import BM25_FILE, CHROMA_DIR, IndexHandle, IndexSnapshot
 from codesearch.index.vector_store import VectorStore
-from codesearch.ingest.chunker import chunk_page, chunk_page_fixed
+from codesearch.ingest.chunker import chunk_page, chunk_page_v1
 from codesearch.ingest.fetch import CorpusSnapshot, fetch_corpus
 from codesearch.ingest.manifest import (
     PIPELINE_VERSION,
@@ -80,7 +80,11 @@ def collect_chunks(corpus: CorpusSnapshot, params: ChunkParams) -> list[Chunk]:
         url = path_to_url(page_path, corpus.content_root)
         source_path = page_path.relative_to(corpus.content_root).as_posix()
         if params.strategy == "v1":
-            chunks.extend(chunk_page_fixed(page, url, source_path, max_chars=params.max_chars))
+            chunks.extend(
+                chunk_page_v1(
+                    page, url, source_path, max_chars=params.max_chars, overlap=params.overlap
+                )
+            )
         else:
             chunks.extend(
                 chunk_page(

@@ -1,15 +1,20 @@
-# Baseline: reproduces how v1 retrieved, with today's embedder (bge-small).
-#   - v1 chunking: blind 1,000-character cuts, no header path, no anchors
-#   - dense search only, top 3 (v1 sent 3 chunks to the LLM)
-# Needs its own index: build it with
-#   CODESEARCH_INDEX__CHUNK_STRATEGY=v1 CODESEARCH_INDEX__INDEX_DIR=index/v1 uv run codesearch ingest
-# Compare v1 against v2 at PAGE level (page_* metrics): v1 chunks have no anchors.
+# Baseline: v1's chunking with everything else held equal to the dense row, so the
+# difference between the two rows is the chunking alone.
+#   - v1 chunking (vectorstore.py on the v1 branch): split at #/##/### headings with
+#     the heading kept, then LangChain's recursive splitter at 1,000 characters with
+#     150 overlap; no header path in the text, code blocks can be cut
+#   - same embedder (bge-small) and the same dense top-10 as the dense row. v1 itself
+#     used nomic-embed-text and sent 3 chunks to the LLM; both are held fixed here.
+# Needs its own index (the overlap is part of the index version):
+#   CODESEARCH_INDEX__CHUNK_STRATEGY=v1 CODESEARCH_INDEX__CHUNK_OVERLAP=150 \
+#   CODESEARCH_INDEX__INDEX_DIR=index/v1 uv run codesearch ingest
 name: v1
-description: v1-style chunking + dense top-3 (baseline)
+description: v1 chunking (headings, then 1,000-char recursive split, 150 overlap) + dense top-10
 overrides:
   index:
     chunk_strategy: v1
+    chunk_overlap: 150
     index_dir: index/v1
   retrieval:
     mode: dense
-    dense_k: 3
+    dense_k: 10
