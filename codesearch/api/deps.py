@@ -17,6 +17,8 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from codesearch.config import Settings
+from codesearch.errors import TraceNotFoundError
+from codesearch.explain.trace import TraceStore
 from codesearch.index.handle import IndexHandle
 from codesearch.pipeline import AnswerPipeline
 
@@ -39,6 +41,14 @@ def get_index_handle(request: Request) -> IndexHandle:
     return handle
 
 
+def get_trace_store(request: Request) -> TraceStore:
+    store: TraceStore | None = get_pipeline(request).trace_store
+    if store is None:
+        raise TraceNotFoundError("trace store disabled")
+    return store
+
+
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 PipelineDep = Annotated[AnswerPipeline, Depends(get_pipeline)]
 HandleDep = Annotated[IndexHandle, Depends(get_index_handle)]
+TraceStoreDep = Annotated[TraceStore, Depends(get_trace_store)]

@@ -31,7 +31,7 @@ class RetrievalSettings(BaseModel):
     dense_k: int = 20
     rrf_k: int = 60
     reranker_model: str | None = None
-    rerank_top_n: int = 5
+    rerank_top_n: int = 3
     abstain_threshold: float = 0.755
     history_turns: int = 3
 
@@ -72,6 +72,19 @@ class AdminSettings(BaseModel):
     reindex_interval_hours: int = 6
 
 
+class ExplainSettings(BaseModel):
+    trace_db: Path = Path("traces/trace.db")
+    groundedness: bool = True
+    supported_threshold: float = 0.7
+    nli_model: str = "cross-encoder/nli-deberta-v3-base"
+    partial_threshold: float = 0.4
+    # Diagnostic: also score each sentence against EVERY source (finds mis-citations).
+    # Off in production (costs sentences x chunks NLI pairs); the answer eval turns it on.
+    check_all_sources: bool = False
+    # Fitted by eval/fit_calibrator.py. Missing file -> answers have no confidence.
+    calibrator_path: Path = Path("models/calibrator.json")
+
+
 class Settings(BaseSettings):
     """Root configuration object for CodeSearch AI."""
 
@@ -90,6 +103,7 @@ class Settings(BaseSettings):
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     admin: AdminSettings = Field(default_factory=AdminSettings)
     image_sha: str | None = None  # set via CODESEARCH_IMAGE_SHA (Docker build)
+    explain: ExplainSettings = Field(default_factory=ExplainSettings)
 
     def with_overrides(self, **kwargs: Any) -> "Settings":
         """Return a new Settings instance with specified field overrides.

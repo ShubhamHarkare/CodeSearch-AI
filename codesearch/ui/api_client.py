@@ -104,6 +104,9 @@ class ApiClient:
         """GET /v1/index -> manifest summary (503 before the index loads raises)."""
         return self._handle_response(self._request("GET", "/v1/index"))
 
+    def explain(self, trace_id: str) -> dict[str, Any]:
+        return self._handle_response(self._request("GET", f"/v1/explain/{trace_id}"))
+
     # Phase 2-3 (added with their endpoints): ask_stream, explain, deep_explain,
     # send_feedback, metrics_summary.
 

@@ -184,6 +184,18 @@ def test_contributions_sum_to_the_search_score() -> None:
     assert sum(parts.values()) == pytest.approx(score)
 
 
+def test_contributions_still_sum_to_the_score_when_a_query_word_repeats() -> None:
+    """BM25 counts a repeated query word once per occurrence ("update state based on the
+    previous state" scores "state" twice), so its contribution must count it twice too."""
+    idx = BM25Index(["c1", "c2", "c3"], [["use", "state", "hook"], ["use", "effect"], ["memo"]])
+    query = "state use state"
+    score = dict(idx.search(query, 3))["c1"]
+    parts = idx.term_contributions(query, "c1")
+    assert list(parts) == ["state", "use"]  # still one entry per word
+    assert sum(parts.values()) == pytest.approx(score)
+    assert parts["state"] == pytest.approx(2 * idx.term_contributions("state", "c1")["state"])
+
+
 def test_contributions_only_include_words_in_that_chunk() -> None:
     idx = BM25Index(["c1", "c2", "c3"], [["use", "state", "hook"], ["use", "effect"], ["memo"]])
     assert set(idx.term_contributions("use state", "c2")) == {"use"}

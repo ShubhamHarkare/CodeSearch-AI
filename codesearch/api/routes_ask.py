@@ -20,10 +20,16 @@ Phase: 1 (ask), 2 (explain), 3 (stream, feedback)
 
 from fastapi import APIRouter, Request
 
-from codesearch.api.deps import PipelineDep
+from codesearch.api.deps import PipelineDep, TraceStoreDep
 from codesearch.api.models import AskRequest, AskResponse
+from codesearch.schemas import ExplanationTrace
 
 router = APIRouter(prefix="/v1", tags=["ask"])
+
+
+@router.get("/explain/{trace_id}", response_model=ExplanationTrace)
+async def explain(trace_id: str, store: TraceStoreDep) -> ExplanationTrace:
+    return store.get(trace_id)
 
 
 @router.post("/ask", response_model=AskResponse)

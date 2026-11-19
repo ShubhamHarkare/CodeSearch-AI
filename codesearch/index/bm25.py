@@ -80,9 +80,11 @@ class BM25Index:
             return {}
         contributions: dict[str, float] = {}
         chunk_words = self.token_set[i]  # the set of words in THIS chunk only
+        query_tokens = tokenize(query)
         for unique_word in dict.fromkeys(tokenize(query)):
             if unique_word in chunk_words:
-                contributions[unique_word] = float(self.bm25.get_scores([unique_word])[i])
+                once = float(self.bm25.get_scores([unique_word])[i])
+                contributions[unique_word] = once * query_tokens.count(unique_word)
 
         return contributions
 

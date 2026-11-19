@@ -9,6 +9,7 @@ cases are added in later phases.
 from __future__ import annotations
 
 import dataclasses
+import sqlite3
 from typing import Any
 
 import fakeredis
@@ -19,10 +20,14 @@ from codesearch.cache.memory import LRUCache
 from codesearch.cache.semantic import SemanticCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
-from codesearch.errors import IndexNotReadyError, LLMUnavailableError
+from codesearch.errors import IndexNotReadyError, LLMUnavailableError, TraceNotFoundError
+from codesearch.explain.calibration import Calibrator
+from codesearch.explain.groundedness import NLIScorer
+from codesearch.explain.trace import TraceStore
 from codesearch.factory import build_cache, build_pipeline
 from codesearch.generation.llm import FakeLLM
 from codesearch.generation.prompts import load_prompt
+from codesearch.index.bm25 import tokenize
 from codesearch.index.embedder import HashEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
 from codesearch.ingest.build import build_index
@@ -56,6 +61,8 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> tuple[Settings, IndexSnap
         },
         retrieval={"mode": "dense", "dense_k": 10, "rerank_top_n": 5},
         llm={"provider": "fake"},
+        # never write traces into the repo; never download the NLI model in tests
+        explain={"trace_db": root / "traces.db", "groundedness": False},
     )
     build_index(settings, HashEmbedder())
     snapshot = IndexSnapshot.open(root / "index")
@@ -86,10 +93,16 @@ def make(
     handle: IndexHandle | None = None,
     cache: Any = None,
     answer_prompt: Any = None,
+    trace_store: Any = None,
+    grounder: Any = None,
+    calibrator: Any = None,
+    explain: dict[str, Any] | None = None,
     **retrieval: Any,
 ) -> tuple[AnswerPipeline, Any]:
     settings, snapshot = built
-    settings = settings.with_overrides(retrieval={"abstain_threshold": threshold, **retrieval})
+    settings = settings.with_overrides(
+        retrieval={"abstain_threshold": threshold, **retrieval}, explain=explain or {}
+    )
     handle = handle if handle is not None else IndexHandle(snapshot)
     llm = llm if llm is not None else FakeLLM()
     pipeline = AnswerPipeline(
@@ -101,6 +114,9 @@ def make(
         condense_prompt=load_prompt("condense"),
         settings=settings,
         cache=cache,
+        trace_store=trace_store,
+        grounder=grounder,
+        calibrator=calibrator,
     )
     return pipeline, llm
 
@@ -455,3 +471,438 @@ async def test_a_cache_hit_takes_the_callers_trace_id(built: Any) -> None:
     pipeline, _ = make(built, cache=memory_cache())
     await pipeline.answer(QUESTION)
     assert (await pipeline.answer(QUESTION, trace_id="req-2")).trace_id == "req-2"
+
+
+# =====================================================================
+# Traces: every answer (fresh, abstained, refused, cached) gets one
+# =====================================================================
+
+
+async def test_an_answer_saves_a_trace_under_its_trace_id(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert trace.question == QUESTION
+    assert trace.standalone_question == QUESTION
+    assert trace.abstain_reason is None
+    assert trace.cache_tier is None
+
+
+async def test_the_trace_lists_candidates_and_the_chunks_sent_to_the_llm(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, dense_k=10, rerank_top_n=3)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert len(trace.candidates) == 10  # everything retrieval returned
+    assert len(trace.used_chunk_ids) == 3  # what the reranker kept for the prompt
+    candidate_ids = [c.chunk.id for c in trace.candidates]
+    assert set(trace.used_chunk_ids) <= set(candidate_ids)
+    assert all(c.dense_score is not None for c in trace.candidates)
+    cited = {c.chunk_id for c in answer.citations}
+    assert cited <= set(trace.used_chunk_ids)  # every citation points at a used chunk
+
+
+async def test_the_trace_records_versions_and_the_same_timings_as_the_answer(built: Any) -> None:
+    settings, snapshot = built
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert trace.versions == {
+        "index_version": snapshot.manifest.index_version,
+        "prompt_version": load_prompt("answer").version,
+        "model": settings.llm.model,
+    }
+    assert trace.timings == answer.timings
+    assert {"retrieval_ms", "generation_ms", "total_ms"} <= set(trace.timings)
+
+
+async def test_a_follow_up_trace_has_both_questions(built: Any) -> None:
+    store = TraceStore()
+    llm = FakeLLM(responses=[REWRITE, "Copy the object first [1]."])
+    pipeline, _ = make(built, llm=llm, trace_store=store)
+    answer = await pipeline.answer("what about objects?", history=HISTORY)
+    trace = store.get(answer.trace_id)
+    assert trace.question == "what about objects?"
+    assert trace.standalone_question == REWRITE
+    assert "condense_ms" in trace.timings
+
+
+async def test_an_abstained_answer_has_a_trace_saying_why(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, threshold=ALWAYS_ABSTAIN)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    assert trace.abstain_reason is not None
+    assert trace.abstain_reason.startswith("below_threshold")
+    assert "dense" in trace.abstain_reason  # which score was judged
+    assert trace.candidates  # you can still see what retrieval found
+    assert trace.used_chunk_ids == []  # nothing went to the LLM
+
+
+async def test_a_model_refusal_is_recorded_as_the_abstain_reason(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, llm=FakeLLM(responses=[NOT_COVERED]), trace_store=store)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is True
+    assert store.get(answer.trace_id).abstain_reason == "model_refusal"
+
+
+async def test_an_exact_cache_hit_has_its_own_trace(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, cache=memory_cache(), trace_store=store)
+    first = await pipeline.answer(QUESTION)
+    hit = await pipeline.answer(QUESTION)
+    trace = store.get(hit.trace_id)
+    assert trace.cache_tier == "exact"
+    assert trace.candidates == []  # retrieval never ran
+    assert trace.used_chunk_ids == [c.chunk_id for c in first.citations]  # from the cached answer
+    assert len(store) == 2
+
+
+async def test_a_semantic_cache_hit_trace_keeps_the_retrieval(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, cache=memory_cache(), trace_store=store)
+    await pipeline.answer(QUESTION)
+    hit = await pipeline.answer("Based on the previous state how do I update state?")
+    trace = store.get(hit.trace_id)
+    assert trace.cache_tier == "semantic"
+    assert trace.candidates  # retrieval ran before the semantic lookup
+
+
+async def test_a_failed_request_saves_no_trace(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, llm=DownLLM(), trace_store=store)
+    with pytest.raises(LLMUnavailableError):
+        await pipeline.answer(QUESTION, trace_id="failed")
+    with pytest.raises(TraceNotFoundError):
+        store.get("failed")
+
+
+class BrokenStore(TraceStore):
+    def save(self, trace: Any) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+
+async def test_a_broken_trace_store_never_breaks_the_answer(built: Any) -> None:
+    """Explanations are secondary: losing a trace must not lose the answer."""
+    pipeline, _ = make(built, trace_store=BrokenStore())
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is False
+
+
+async def test_without_a_store_answers_still_work(built: Any) -> None:
+    pipeline, _ = make(built)
+    assert (await pipeline.answer(QUESTION)).abstained is False
+
+
+def test_build_pipeline_includes_a_trace_store(built: Any, tmp_path: Any) -> None:
+    settings, _ = built
+    settings = settings.with_overrides(explain={"trace_db": tmp_path / "t" / "traces.db"})
+    pipeline = build_pipeline(settings)
+    assert isinstance(pipeline.trace_store, TraceStore)
+    assert (tmp_path / "t" / "traces.db").exists()
+
+
+# =====================================================================
+# Matched terms: which words of the question each used source contains
+# =====================================================================
+
+
+async def test_every_used_chunk_has_its_matched_terms(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    trace = store.get((await pipeline.answer(QUESTION)).trace_id)
+    assert set(trace.matched_terms) == set(trace.used_chunk_ids)
+
+
+async def test_matched_terms_come_from_the_question_and_have_positive_weights(
+    built: Any,
+) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    trace = store.get((await pipeline.answer(QUESTION)).trace_id)
+    question_words = set(tokenize(QUESTION))
+    all_terms = [t for terms in trace.matched_terms.values() for t in terms]
+    assert all_terms, "at least one used source should share a word with the question"
+    assert set(all_terms) <= question_words
+    assert all(w > 0 for terms in trace.matched_terms.values() for w in terms.values())
+
+
+async def test_matched_terms_use_the_condensed_question(built: Any) -> None:
+    """The follow-up "what about objects?" was searched as the rewrite, so the
+    matched words must come from the rewrite."""
+    store = TraceStore()
+    llm = FakeLLM(responses=[REWRITE, "Copy the object first [1]."])
+    pipeline, _ = make(built, llm=llm, trace_store=store)
+    trace = store.get((await pipeline.answer("what about objects?", history=HISTORY)).trace_id)
+    all_terms = {t for terms in trace.matched_terms.values() for t in terms}
+    assert all_terms <= set(tokenize(REWRITE))
+
+
+async def test_matched_terms_add_up_to_the_bm25_score(built: Any) -> None:
+    """In hybrid mode, a chunk that BM25 retrieved has a bm25_score; its matched-term
+    contributions must add up to exactly that score."""
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, mode="hybrid", bm25_k=10, dense_k=10)
+    trace = store.get((await pipeline.answer(QUESTION)).trace_id)
+    by_id = {c.chunk.id: c for c in trace.candidates}
+    checked = 0
+    for chunk_id, terms in trace.matched_terms.items():
+        bm25_score = by_id[chunk_id].bm25_score
+        if bm25_score is not None:
+            assert sum(terms.values()) == pytest.approx(bm25_score)
+            checked += 1
+    assert checked, "at least one used chunk should have come from BM25"
+
+
+async def test_abstains_and_cache_hits_have_no_matched_terms(built: Any) -> None:
+    store = TraceStore()
+    abstaining, _ = make(built, trace_store=store, threshold=ALWAYS_ABSTAIN)
+    assert store.get((await abstaining.answer(QUESTION)).trace_id).matched_terms == {}
+
+    cached, _ = make(built, trace_store=store, cache=memory_cache())
+    await cached.answer(QUESTION)
+    hit = await cached.answer(QUESTION)
+    assert store.get(hit.trace_id).matched_terms == {}
+
+
+# =====================================================================
+# Groundedness: each cited sentence checked against its chunk
+# =====================================================================
+
+
+class FakeGrounder:
+    """Entailment from a rule on (premise, hypothesis); records every batch."""
+
+    def __init__(self, rule: Any = 0.9) -> None:
+        self.rule = rule
+        self.calls: list[list[tuple[str, str]]] = []
+
+    def entailment(self, pairs: Any) -> list[float]:
+        self.calls.append(list(pairs))
+        if callable(self.rule):
+            return [self.rule(p, h) for p, h in pairs]
+        return [float(self.rule)] * len(pairs)
+
+
+class ExplodingGrounder(FakeGrounder):
+    def entailment(self, pairs: Any) -> list[float]:
+        raise RuntimeError("NLI model failed to load")
+
+
+# FakeLLM's default answer: two sentences citing [1] and [2].
+DEFAULT_SENTENCES = FakeLLM.DEFAULT_ANSWER.count(".")
+
+
+async def test_a_grounded_answer_gets_a_score_and_sentence_labels(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=FakeGrounder(0.9))
+    answer = await pipeline.answer(QUESTION)
+    assert answer.groundedness == 1.0
+    trace = store.get(answer.trace_id)
+    assert len(trace.sentences) == DEFAULT_SENTENCES
+    assert all(s.label == "supported" for s in trace.sentences)
+    assert "groundedness_ms" in answer.timings
+
+
+async def test_an_ungrounded_answer_scores_zero(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=FakeGrounder(0.1))
+    answer = await pipeline.answer(QUESTION)
+    assert answer.groundedness == 0.0
+    assert all(s.label == "unsupported" for s in store.get(answer.trace_id).sentences)
+
+
+async def test_each_sentence_is_checked_against_the_chunk_it_cites(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=grounder)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    texts = {c.chunk.id: c.chunk.text for c in trace.candidates}
+    cited = {c.number: c.chunk_id for c in answer.citations}
+    premises = [premise for premise, _ in grounder.calls[0]]
+    assert premises == [texts[cited[1]], texts[cited[2]]]
+
+
+async def test_thresholds_come_from_settings(built: Any) -> None:
+    store = TraceStore()
+    loose, _ = make(
+        built,
+        trace_store=store,
+        grounder=FakeGrounder(0.5),
+        explain={"supported_threshold": 0.45, "partial_threshold": 0.2},
+    )
+    answer = await loose.answer(QUESTION)
+    assert answer.groundedness == 1.0
+    assert {s.label for s in store.get(answer.trace_id).sentences} == {"supported"}
+
+    strict, _ = make(built, trace_store=store, grounder=FakeGrounder(0.5))
+    answer = await strict.answer(QUESTION)
+    assert {s.label for s in store.get(answer.trace_id).sentences} == {"partial"}
+
+
+async def test_abstained_answers_are_not_graded(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(built, grounder=grounder, threshold=ALWAYS_ABSTAIN)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.groundedness is None
+    assert grounder.calls == []
+
+
+async def test_a_model_refusal_is_not_graded(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(built, llm=FakeLLM(responses=[NOT_COVERED]), grounder=grounder)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is True
+    assert answer.groundedness is None
+    assert grounder.calls == []
+
+
+async def test_a_failing_grounder_never_breaks_the_answer(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=ExplodingGrounder())
+    answer = await pipeline.answer(QUESTION)
+    assert answer.abstained is False
+    assert answer.groundedness is None
+    assert store.get(answer.trace_id).sentences == []
+
+
+async def test_without_a_grounder_groundedness_is_none(built: Any) -> None:
+    pipeline, _ = make(built)
+    assert (await pipeline.answer(QUESTION)).groundedness is None
+
+
+async def test_a_cache_hit_keeps_the_original_groundedness(built: Any) -> None:
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(built, cache=memory_cache(), grounder=grounder)
+    await pipeline.answer(QUESTION)
+    hit = await pipeline.answer(QUESTION)
+    assert hit.cache_tier == "exact"
+    assert hit.groundedness == 1.0
+    assert len(grounder.calls) == 1  # graded once, when it was generated
+
+
+def test_build_pipeline_adds_the_nli_grounder_when_enabled(built: Any) -> None:
+    settings, _ = built
+    pipeline = build_pipeline(settings.with_overrides(explain={"groundedness": True}))
+    assert isinstance(pipeline.grounder, NLIScorer)
+    assert pipeline.grounder.model_name == settings.explain.nli_model
+
+
+def test_build_pipeline_without_groundedness(built: Any) -> None:
+    settings, _ = built
+    assert build_pipeline(settings).grounder is None  # the fixture turns it off
+
+
+async def test_the_all_sources_diagnostic_is_off_by_default(built: Any) -> None:
+    """In production each sentence is checked only against what it cites (cheap)."""
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, grounder=FakeGrounder(0.9))
+    answer = await pipeline.answer(QUESTION)
+    assert all(s.best_score is None for s in store.get(answer.trace_id).sentences)
+
+
+async def test_the_all_sources_diagnostic_can_be_switched_on(built: Any) -> None:
+    store = TraceStore()
+    grounder = FakeGrounder(0.9)
+    pipeline, _ = make(
+        built, trace_store=store, grounder=grounder, explain={"check_all_sources": True}
+    )
+    answer = await pipeline.answer(QUESTION)
+    sentences = store.get(answer.trace_id).sentences
+    assert all(s.best_score == 0.9 for s in sentences)
+    n_chunks = len(store.get(answer.trace_id).used_chunk_ids)
+    assert len(grounder.calls[0]) == len(sentences) * n_chunks
+
+
+# =====================================================================
+# Confidence: a calibrated probability that the answer is good
+# =====================================================================
+
+
+class SpyCalibrator(Calibrator):
+    """A real Calibrator that also records the feature vectors it was given."""
+
+    def __init__(self) -> None:
+        super().__init__(coef=[0.0, 0.0, 2.0], intercept=-1.0)  # driven by groundedness
+        object.__setattr__(self, "seen", [])
+
+    def confidence(self, x: Any) -> float:
+        self.seen.append(list(x))  # type: ignore[attr-defined]
+        return super().confidence(x)
+
+
+async def test_an_answer_gets_a_calibrated_confidence(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(built, grounder=FakeGrounder(0.9), calibrator=calibrator)
+    answer = await pipeline.answer(QUESTION)
+    assert answer.confidence is not None
+    assert answer.confidence == pytest.approx(calibrator.confidence(calibrator.seen[0]))
+    top, mean3, grounded = calibrator.seen[0]
+    assert grounded == answer.groundedness == 1.0
+    assert top >= mean3 > 0  # dense scores of the chunks sent to the LLM
+
+
+async def test_confidence_uses_the_chunks_sent_to_the_llm(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store, calibrator=calibrator, rerank_top_n=3)
+    answer = await pipeline.answer(QUESTION)
+    trace = store.get(answer.trace_id)
+    used = [c for c in trace.candidates if c.chunk.id in trace.used_chunk_ids]
+    expected_top = max(c.dense_score for c in used if c.dense_score is not None)
+    assert calibrator.seen[0][0] == pytest.approx(expected_top)
+
+
+async def test_no_grounder_means_groundedness_feature_is_zero(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(built, calibrator=calibrator)
+    answer = await pipeline.answer(QUESTION)
+    assert calibrator.seen[0][2] == 0.0
+    assert answer.confidence is not None
+
+
+async def test_abstained_answers_have_no_confidence(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(built, calibrator=calibrator, threshold=ALWAYS_ABSTAIN)
+    assert (await pipeline.answer(QUESTION)).confidence is None
+    refusing, _ = make(built, llm=FakeLLM(responses=[NOT_COVERED]), calibrator=calibrator)
+    assert (await refusing.answer(QUESTION)).confidence is None
+    assert calibrator.seen == []
+
+
+async def test_without_a_calibrator_confidence_is_none(built: Any) -> None:
+    pipeline, _ = make(built, grounder=FakeGrounder(0.9))
+    assert (await pipeline.answer(QUESTION)).confidence is None
+
+
+async def test_a_cache_hit_keeps_the_original_confidence(built: Any) -> None:
+    calibrator = SpyCalibrator()
+    pipeline, _ = make(
+        built, cache=memory_cache(), grounder=FakeGrounder(0.9), calibrator=calibrator
+    )
+    first = await pipeline.answer(QUESTION)
+    hit = await pipeline.answer(QUESTION)
+    assert hit.cache_tier == "exact"
+    assert hit.confidence == first.confidence
+    assert len(calibrator.seen) == 1
+
+
+def test_build_pipeline_loads_a_saved_calibrator(built: Any, tmp_path: Any) -> None:
+    settings, _ = built
+    path = tmp_path / "calibrator.json"
+    Calibrator(coef=[1.0, 1.0, 1.0], intercept=0.0).save(path)
+    pipeline = build_pipeline(settings.with_overrides(explain={"calibrator_path": path}))
+    assert pipeline.calibrator == Calibrator(coef=[1.0, 1.0, 1.0], intercept=0.0)
+
+
+def test_build_pipeline_without_a_calibrator_file(built: Any, tmp_path: Any) -> None:
+    """Not fitted yet: answers simply have no confidence (never a crash)."""
+    settings, _ = built
+    pipeline = build_pipeline(
+        settings.with_overrides(explain={"calibrator_path": tmp_path / "none.json"})
+    )
+    assert pipeline.calibrator is None

@@ -24,7 +24,8 @@ from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.memory import LRUCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.config import Settings
-from codesearch.errors import IndexNotReadyError, LLMUnavailableError
+from codesearch.errors import IndexNotReadyError, LLMUnavailableError, TraceNotFoundError
+from codesearch.explain.trace import TraceStore
 from codesearch.generation.llm import FakeLLM
 from codesearch.generation.prompts import load_prompt
 from codesearch.index.embedder import HashEmbedder
@@ -57,6 +58,7 @@ def built(tmp_path_factory: pytest.TempPathFactory) -> tuple[Settings, IndexSnap
         retrieval={"mode": "dense", "dense_k": 10, "rerank_top_n": 5},
         llm={"provider": "fake"},
         cache={"enabled": False},
+        explain={"trace_db": root / "traces.db", "groundedness": False},  # no NLI download
         image_sha="abc1234",
     )
     build_index(settings, HashEmbedder())
@@ -82,6 +84,7 @@ def make_pipeline(
     cache: Any = None,
     handle: IndexHandle | None = None,
     threshold: float = ALWAYS_ANSWER,
+    trace_store: Any = None,
 ) -> tuple[Settings, AnswerPipeline]:
     settings, snapshot = built
     settings = settings.with_overrides(retrieval={"abstain_threshold": threshold})
@@ -95,6 +98,7 @@ def make_pipeline(
         condense_prompt=load_prompt("condense"),
         settings=settings,
         cache=cache,
+        trace_store=trace_store if trace_store is not None else TraceStore(),
     )
     return settings, pipeline
 
@@ -406,4 +410,55 @@ async def test_create_app_with_no_index_built_yet(built: Any, tmp_path: Any) -> 
 def test_openapi_lists_the_phase_1_routes(built: Any) -> None:
     settings, _ = built
     paths = create_app(settings).openapi()["paths"]
-    assert {"/v1/ask", "/healthz", "/readyz", "/v1/index"} <= set(paths)
+    assert {"/v1/ask", "/healthz", "/readyz", "/v1/index", "/v1/explain/{trace_id}"} <= set(paths)
+
+
+# =====================================================================
+# GET /v1/explain/{trace_id}
+# =====================================================================
+
+
+async def test_explain_returns_the_trace_of_an_answer(client: Client) -> None:
+    async with client() as c:
+        answer = (await c.post("/v1/ask", json={"question": QUESTION})).json()
+        r = await c.get(f"/v1/explain/{answer['trace_id']}")
+    assert r.status_code == 200
+    trace = r.json()
+    assert trace["trace_id"] == answer["trace_id"]
+    assert trace["question"] == QUESTION
+    assert trace["candidates"] and trace["used_chunk_ids"]
+    first = trace["candidates"][0]
+    assert {"chunk", "dense_score", "bm25_score", "rrf_score", "rerank_score"} <= set(first)
+    assert first["chunk"]["url"].startswith("https://react.dev")
+    assert trace["timings"] == answer["timings"]
+    assert set(trace["matched_terms"]) == set(trace["used_chunk_ids"])
+
+
+async def test_explain_shows_why_an_answer_abstained(client: Client) -> None:
+    async with client(threshold=ALWAYS_ABSTAIN) as c:
+        answer = (await c.post("/v1/ask", json={"question": "capital of France?"})).json()
+        r = await c.get(f"/v1/explain/{answer['trace_id']}")
+    assert r.status_code == 200
+    assert r.json()["abstain_reason"].startswith("below_threshold")
+
+
+async def test_explain_unknown_trace_is_404(client: Client) -> None:
+    async with client() as c:
+        r = await c.get("/v1/explain/does-not-exist")
+    assert r.status_code == 404
+    assert r.json()["error"] == TraceNotFoundError.public_message
+
+
+async def test_explain_uses_the_client_supplied_trace_id(client: Client) -> None:
+    async with client() as c:
+        await c.post("/v1/ask", json={"question": QUESTION}, headers={"X-Trace-Id": "ui-7"})
+        r = await c.get("/v1/explain/ui-7")
+    assert r.status_code == 200
+
+
+async def test_explain_without_a_trace_store_is_404(built: Any) -> None:
+    settings, pipeline = make_pipeline(built)
+    pipeline.trace_store = None
+    async with serve(create_app(settings, pipeline=pipeline)) as c:
+        r = await c.get("/v1/explain/anything")
+    assert r.status_code == 404

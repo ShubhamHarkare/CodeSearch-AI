@@ -207,6 +207,26 @@ def test_index_info_before_the_index_loads_raises() -> None:
 
 
 # =====================================================================
+# explain (the "Why this answer?" panel)
+# =====================================================================
+
+
+def test_explain_gets_the_trace() -> None:
+    body = {"trace_id": "t-1", "question": "q", "candidates": []}
+    api = Recorder(httpx.Response(200, json=body))
+    assert make(api).explain("t-1") == body
+    assert api.requests[0].method == "GET"
+    assert api.requests[0].url == f"{BASE}/v1/explain/t-1"
+
+
+def test_explain_unknown_trace_raises_with_status_404() -> None:
+    body = {"error": "Requested trace ID was not found.", "trace_id": "x"}
+    with pytest.raises(ApiError) as caught:
+        make(Recorder(httpx.Response(404, json=body))).explain("nope")
+    assert caught.value.status == 404
+
+
+# =====================================================================
 # Lifecycle and boundaries
 # =====================================================================
 
