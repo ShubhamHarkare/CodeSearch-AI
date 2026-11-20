@@ -20,7 +20,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from codesearch.ingest.manifest import ChangeLogEntry
-from codesearch.schemas import Answer, ChatMessage, Citation
+from codesearch.schemas import Answer, CacheTier, ChatMessage, Citation
 
 
 class AskRequest(BaseModel):
@@ -36,7 +36,7 @@ class AskResponse(BaseModel):
     abstained: bool
     confidence: float | None = None
     groundedness: float | None = None
-    cache_tier: Literal["exact", "semantic"] | None = None
+    cache_tier: CacheTier | None = None
     timings: dict[str, float]
     trace_id: str
     index_version: str

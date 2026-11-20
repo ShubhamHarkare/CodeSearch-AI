@@ -8,6 +8,7 @@ cases are added in later phases.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import sqlite3
 from typing import Any
@@ -389,6 +390,110 @@ async def test_bypass_cache_skips_the_lookup_but_refreshes_the_entry(built: Any)
     third = await pipeline.answer(QUESTION)
     assert third.cache_tier == "exact"
     assert third.text == "New [1]."  # the refreshed answer was stored
+
+
+# =====================================================================
+# Single-flight: identical questions in flight share one answer
+# =====================================================================
+
+
+class GatedLLM(FakeLLM):
+    """A FakeLLM that waits on a gate, so concurrent requests really overlap."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.error = error
+
+    async def generate(self, prompt: str, system: str | None = None) -> str:
+        self.prompts.append(prompt)  # counted when the call starts
+        await self.gate.wait()
+        if self.error is not None:
+            raise self.error
+        return self.DEFAULT_ANSWER
+
+
+async def overlap(
+    pipeline: AnswerPipeline, llm: GatedLLM, questions: list[str], **kw: Any
+) -> list[Any]:
+    """Start every question, let them all reach the LLM gate, then open it."""
+    tasks = [asyncio.create_task(pipeline.answer(q, **kw)) for q in questions]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    llm.gate.set()
+    return await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_identical_questions_in_flight_make_one_llm_call(built: Any) -> None:
+    llm = GatedLLM()
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    answers = await overlap(pipeline, llm, [QUESTION] * 10)
+
+    assert len(llm.prompts) == 1
+    assert sorted(str(a.cache_tier) for a in answers) == ["None"] + ["shared"] * 9
+    assert {a.text for a in answers} == {FakeLLM.DEFAULT_ANSWER}
+    assert all(a.citations == answers[0].citations for a in answers)
+
+
+async def test_each_shared_answer_gets_its_own_trace_id_and_timings(built: Any) -> None:
+    llm = GatedLLM()
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    answers = await overlap(pipeline, llm, [QUESTION] * 3)
+
+    assert len({a.trace_id for a in answers}) == 3
+    shared = [a for a in answers if a.cache_tier == "shared"]
+    assert len(shared) == 2
+    assert all("total_ms" in a.timings for a in shared)
+    assert all("generation_ms" not in a.timings for a in shared)  # they generated nothing
+
+
+async def test_different_questions_do_not_share(built: Any) -> None:
+    llm = GatedLLM()
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    answers = await overlap(pipeline, llm, [QUESTION, "How do I use useEffect?"])
+    assert len(llm.prompts) == 2
+    assert all(a.cache_tier is None for a in answers)
+
+
+async def test_bypass_cache_never_shares(built: Any) -> None:
+    """bypass_cache means "do the real work": the eval and the miss load test rely on it."""
+    llm = GatedLLM()
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    answers = await overlap(pipeline, llm, [QUESTION] * 3, bypass_cache=True)
+    assert len(llm.prompts) == 3
+    assert all(a.cache_tier is None for a in answers)
+
+
+async def test_sharing_works_without_a_cache(built: Any) -> None:
+    llm = GatedLLM()
+    pipeline, _ = make(built, llm=llm, cache=None)
+    answers = await overlap(pipeline, llm, [QUESTION] * 4)
+    assert len(llm.prompts) == 1
+    assert sum(a.cache_tier == "shared" for a in answers) == 3
+
+
+async def test_once_answered_the_next_ask_is_a_cache_hit_not_shared(built: Any) -> None:
+    llm = GatedLLM()
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    await overlap(pipeline, llm, [QUESTION] * 2)
+    later = await pipeline.answer(QUESTION)
+    assert later.cache_tier == "exact"
+    assert len(llm.prompts) == 1
+
+
+async def test_an_llm_outage_reaches_every_waiting_request(built: Any) -> None:
+    llm = GatedLLM(error=LLMUnavailableError("ollama is not running"))
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    results = await overlap(pipeline, llm, [QUESTION] * 4)
+    assert len(llm.prompts) == 1
+    assert all(isinstance(r, LLMUnavailableError) for r in results)
+
+
+async def test_nothing_is_left_in_flight_afterwards(built: Any) -> None:
+    llm = GatedLLM()
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    await overlap(pipeline, llm, [QUESTION] * 3)
+    assert len(pipeline.flights) == 0
 
 
 async def test_a_new_prompt_version_never_serves_old_answers(built: Any) -> None:

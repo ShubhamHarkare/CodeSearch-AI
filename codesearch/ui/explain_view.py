@@ -100,7 +100,9 @@ def summary_lines(trace: dict[str, Any]) -> list[str]:
     if standalone and standalone != question:
         lines.append(f"Searched as: {standalone}")
 
-    if cache_tier := trace.get("cache_tier"):
+    if (cache_tier := trace.get("cache_tier")) == "shared":
+        lines.append("Shared with an identical question that was being answered at the same time.")
+    elif cache_tier:
         lines.append(f"Served from the {cache_tier} cache.")
 
     if abstain_reason := trace.get("abstain_reason"):

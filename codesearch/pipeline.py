@@ -29,9 +29,10 @@ Phase: 1 (answer), 2 (explain hooks), 3 (stream)
 import sqlite3
 import time
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from codesearch.cache.keys import make_key
+from codesearch.cache.singleflight import SingleFlight
 from codesearch.config import Settings
 from codesearch.errors import ExplainUnavailableError, TraceNotFoundError
 from codesearch.explain.attribution import leave_one_out
@@ -45,7 +46,7 @@ from codesearch.interfaces import LLM, Embedder, EntailmentScorer, Reranker, Ret
 from codesearch.log import get_logger, new_trace_id
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE, decide
 from codesearch.retrieval.condense import condense
-from codesearch.schemas import Answer, ChatMessage, Citation
+from codesearch.schemas import Answer, CacheTier, ChatMessage, Citation
 
 if TYPE_CHECKING:
     from codesearch.cache.tiered import TieredCache
@@ -82,6 +83,8 @@ class AnswerPipeline:
         self.grounder = grounder
         self.calibrator = calibrator
         self.embedder = embedder
+        # Identical questions in flight share one computation (see _compute).
+        self.flights: SingleFlight[Answer] = SingleFlight()
 
     async def answer(
         self,
@@ -126,6 +129,29 @@ class AnswerPipeline:
             trace.set_used_ids([c.chunk_id for c in hit.citations])
             return self._replay(hit, "exact", trace, pipeline_start)
 
+        # bypass_cache means "do the real work": no cache and no sharing.
+        if bypass_cache:
+            return await self._compute(search_q, key, cache, trace, pipeline_start)
+
+        # Single-flight: the first request for this key computes the answer; identical
+        # requests that arrive meanwhile wait for it instead of calling the LLM again.
+        answer, shared = await self.flights.do(
+            key, lambda: self._compute(search_q, key, cache, trace, pipeline_start)
+        )
+        if shared:
+            trace.set_used_ids([c.chunk_id for c in answer.citations])
+            return self._replay(answer, "shared", trace, pipeline_start)
+        return answer
+
+    async def _compute(
+        self,
+        search_q: str,
+        key: str,
+        cache: "TieredCache | None",
+        trace: TraceBuilder,
+        pipeline_start: float,
+    ) -> Answer:
+        """Retrieve, decide, generate and store one answer (everything after the exact cache)."""
         # Retrieve candidates, then rerank and keep rerank_top_n for the prompt.
         with trace.time("retrieval"):
             raw_chunks = self.retriever.retrieve(search_q)
@@ -251,7 +277,7 @@ class AnswerPipeline:
     def _replay(
         self,
         hit: Answer,
-        tier: Literal["exact", "semantic"],
+        tier: CacheTier,
         trace: TraceBuilder,
         start: float,
     ) -> Answer:

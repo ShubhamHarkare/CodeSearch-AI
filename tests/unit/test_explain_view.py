@@ -178,6 +178,9 @@ def test_summary_explains_an_abstain() -> None:
 def test_summary_mentions_a_cache_hit() -> None:
     assert "Served from the exact cache." in summary_lines(trace(cache_tier="exact"))
     assert "Served from the semantic cache." in summary_lines(trace(cache_tier="semantic"))
+    shared = summary_lines(trace(cache_tier="shared"))
+    assert any("identical question" in line for line in shared)
+    assert not any("shared cache" in line for line in shared)
 
 
 def test_an_empty_trace_has_no_summary() -> None:

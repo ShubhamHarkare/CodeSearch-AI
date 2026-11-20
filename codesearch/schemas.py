@@ -5,6 +5,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Where an answer came from when it wasn't generated for this request:
+# exact / semantic = the cache; shared = an identical request that was in flight.
+CacheTier = Literal["exact", "semantic", "shared"]
+
 
 class Chunk(BaseModel):
     """Data shape for a raw code or text chunk."""
@@ -75,7 +79,7 @@ class ExplanationTrace(BaseModel):
     abstain_reason: str | None = None
     timings: dict[str, float] = Field(default_factory=dict)
     versions: dict[str, str] = Field(default_factory=dict)
-    cache_tier: Literal["exact", "semantic"] | None = None
+    cache_tier: CacheTier | None = None
     matched_terms: dict[str, dict[str, float]] = Field(default_factory=dict)
     answer: str | None = None
 
@@ -90,8 +94,7 @@ class Answer(BaseModel):
     abstained: bool
     confidence: float | None = Field(default=None, ge=0, le=1)
     groundedness: float | None = Field(default=None, ge=0, le=1)
-    cache_tier: Literal["exact", "semantic"] | None = None
-    # cache_tier: ExplanationTrace
+    cache_tier: CacheTier | None = None
     timings: dict[str, float] = Field(default_factory=dict)
     trace_id: str
     index_version: str
@@ -117,7 +120,7 @@ class RequestSignals(BaseModel):
     query: str
     retrieval_mode: str
     latency_ms: float
-    cache_tier: Literal["exact", "semantic"] | None = None
+    cache_tier: CacheTier | None = None
     abstained: bool
     groundedness: float = Field(ge=0, le=1)
     top_score: float | None = None

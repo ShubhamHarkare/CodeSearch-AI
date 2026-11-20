@@ -139,7 +139,9 @@ def render_message(msg: dict[str, Any]) -> None:
         meta = []
         if msg.get("abstained"):
             meta.append("Not covered in the React docs")
-        if msg.get("cache_tier"):
+        if msg.get("cache_tier") == "shared":
+            meta.append("shared with an identical question")
+        elif msg.get("cache_tier"):
             meta.append(f"cached ({msg['cache_tier']})")
         if msg.get("groundedness") is not None:
             meta.append(f"grounded {msg['groundedness']:.0%}")

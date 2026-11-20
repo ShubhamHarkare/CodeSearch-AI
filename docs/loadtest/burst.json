@@ -9,25 +9,26 @@
     "status_counts": {
       "200": 10
     },
-    "wall_s": 32.253,
-    "throughput_rps": 0.31,
+    "wall_s": 6.857,
+    "throughput_rps": 1.46,
     "latency_ms": {
-      "p50": 17378.4,
-      "p90": 28858.3,
-      "p99": 32252.1,
-      "max": 32252.1,
-      "mean": 18878.9
+      "p50": 6854.8,
+      "p90": 6854.9,
+      "p99": 6855.3,
+      "max": 6855.3,
+      "mean": 6854.6
     },
     "cache_tiers": {
-      "generated": 10
+      "generated": 1,
+      "shared": 9
     }
   },
   "versions": {
     "prompt_version": "3",
     "index_version": "ac462615f149"
   },
-  "git_sha": "85725a2",
+  "git_sha": "9c9433e",
   "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
   "python": "3.13.5",
-  "at": "2026-11-20T18:05:02+00:00"
+  "at": "2026-11-20T19:21:27+00:00"
 }

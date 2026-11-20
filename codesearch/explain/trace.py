@@ -22,10 +22,9 @@ import time as _time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal
 
 from codesearch.errors import TraceNotFoundError
-from codesearch.schemas import ExplanationTrace, ScoredChunk, SentenceSupport
+from codesearch.schemas import CacheTier, ExplanationTrace, ScoredChunk, SentenceSupport
 
 
 class TraceBuilder:
@@ -37,7 +36,7 @@ class TraceBuilder:
         self._used: list[str] = []
         self._sentences: list[SentenceSupport] = []
         self._abstain_reason: str | None = None
-        self._cache_tier: Literal["exact", "semantic"] | None = None
+        self._cache_tier: CacheTier | None = None
         self._versions: dict[str, str] = {}
         self.timings: dict[str, float] = {}
         self._matched_terms: dict[str, dict[str, float]] = {}
@@ -68,7 +67,7 @@ class TraceBuilder:
     def set_abstain(self, reason: str) -> None:
         self._abstain_reason = reason
 
-    def set_cache_tier(self, tier: Literal["exact", "semantic"]) -> None:
+    def set_cache_tier(self, tier: CacheTier) -> None:
         self._cache_tier = tier
 
     def set_versions(self, **versions: str) -> None:
