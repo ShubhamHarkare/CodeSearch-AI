@@ -10,6 +10,7 @@ reindex webhook are added in later phases.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -505,3 +506,74 @@ async def test_deep_explain_of_an_abstained_answer_is_409(client: Client) -> Non
         r = await c.post(f"/v1/explain/{answer['trace_id']}/deep")
     assert r.status_code == 409
     assert r.json()["error"] == ExplainUnavailableError.public_message
+
+
+# =====================================================================
+# POST /v1/ask/stream (server-sent events)
+# =====================================================================
+
+
+def sse_frames(body: str) -> list[tuple[str, Any]]:
+    """Parse an SSE body into (event, data) pairs."""
+    out: list[tuple[str, Any]] = []
+    for block in body.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.split("\n"))
+        out.append((lines["event"], json.loads(lines["data"])))
+    return out
+
+
+async def test_stream_sends_retrieval_tokens_then_done(client: Client) -> None:
+    async with client() as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["cache-control"] == "no-cache"
+    frames = sse_frames(r.text)
+    kinds = [kind for kind, _ in frames]
+    assert kinds[0] == "retrieval" and kinds[-1] == "done"
+    assert set(kinds[1:-1]) == {"token"}
+    assert "".join(data for kind, data in frames if kind == "token") == FakeLLM.DEFAULT_ANSWER
+
+
+async def test_stream_done_carries_the_answer_and_the_requests_trace_id(client: Client) -> None:
+    async with client() as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    done = sse_frames(r.text)[-1][1]
+    assert done["trace_id"] == r.headers["x-trace-id"]
+    assert [c["number"] for c in done["citations"]] == [1, 2]
+    assert "ttft_ms" in done["timings"]
+
+
+async def test_stream_rejects_an_empty_question_before_streaming(client: Client) -> None:
+    async with client() as c:
+        r = await c.post("/v1/ask/stream", json={"question": ""})
+    assert r.status_code == 422  # validation runs before any event is sent
+
+
+async def test_stream_turns_an_llm_outage_into_an_error_event(client: Client) -> None:
+    async with client(llm=DownLLM()) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    assert r.status_code == 200  # the status was sent before the failure
+    kind, data = sse_frames(r.text)[-1]
+    assert kind == "error"
+    assert data == {
+        "error": LLMUnavailableError.public_message,
+        "trace_id": r.headers["x-trace-id"],
+    }
+
+
+async def test_stream_hides_unexpected_errors(client: Client) -> None:
+    async with client(llm=BrokenLLM()) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    kind, data = sse_frames(r.text)[-1]
+    assert kind == "error"
+    assert data["trace_id"] == r.headers["x-trace-id"]
+    assert "secret internal detail" not in r.text
+
+
+async def test_stream_without_an_index_reports_it_as_an_error_event(client: Client) -> None:
+    async with client(handle=IndexHandle()) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    assert sse_frames(r.text) == [
+        ("error", {"error": IndexNotReadyError.public_message, "trace_id": r.headers["x-trace-id"]})
+    ]

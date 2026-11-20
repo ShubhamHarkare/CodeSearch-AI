@@ -19,9 +19,11 @@ Phase: 1 (ask), 2 (explain), 3 (stream, feedback)
 """
 
 from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 
 from codesearch.api.deps import PipelineDep, TraceStoreDep
 from codesearch.api.models import AskRequest, AskResponse, DeepExplainResponse
+from codesearch.api.sse import stream_response
 from codesearch.schemas import ExplanationTrace
 
 router = APIRouter(prefix="/v1", tags=["ask"])
@@ -50,3 +52,23 @@ async def deep_explain(trace_id: str, pipeline: PipelineDep) -> DeepExplainRespo
     """Re-asks the question once per source with that source removed (slow: k LLM calls)."""
     scores = await pipeline.deep_explain(trace_id)
     return DeepExplainResponse(trace_id=trace_id, scores=scores)
+
+
+@router.post("/ask/stream")
+async def ask_stream(
+    body: AskRequest, request: Request, pipeline: PipelineDep
+) -> StreamingResponse:
+    trace_id = request.state.trace_id
+
+    events = pipeline.stream(
+        question=body.question,
+        history=body.history,
+        bypass_cache=body.bypass_cache,
+        trace_id=trace_id,
+    )
+
+    return StreamingResponse(
+        stream_response(events, request, trace_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

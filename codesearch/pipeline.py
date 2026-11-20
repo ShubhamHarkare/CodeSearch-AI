@@ -28,7 +28,7 @@ Phase: 1 (answer), 2 (explain hooks), 3 (stream)
 
 import sqlite3
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -132,7 +132,7 @@ class AnswerPipeline:
         *,
         bypass_cache: bool = False,
         trace_id: str | None = None,
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncGenerator[StreamEvent]:
         """Like answer(), but yields events as they happen: retrieval, token..., done.
 
         Streaming requests don't use single-flight: sharing a stream would mean
