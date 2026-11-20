@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import sqlite3
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
 import fakeredis
@@ -41,7 +43,7 @@ from codesearch.pipeline import AnswerPipeline
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE
 from codesearch.retrieval.hybrid import HybridRetriever
 from codesearch.retrieval.rerank import NoopReranker
-from codesearch.schemas import Answer, ChatMessage, ScoredChunk
+from codesearch.schemas import Answer, ChatMessage, ScoredChunk, StreamEvent
 from tests.conftest import FakeReactDev
 
 QUESTION = "How do I update state based on the previous state?"
@@ -390,6 +392,198 @@ async def test_bypass_cache_skips_the_lookup_but_refreshes_the_entry(built: Any)
     third = await pipeline.answer(QUESTION)
     assert third.cache_tier == "exact"
     assert third.text == "New [1]."  # the refreshed answer was stored
+
+
+# =====================================================================
+# Streaming: pipeline.stream() yields retrieval, token..., done
+# =====================================================================
+
+
+async def stream_events(
+    pipeline: AnswerPipeline, question: str = QUESTION, **kw: Any
+) -> list[StreamEvent]:
+    async with aclosing(pipeline.stream(question, **kw)) as events:
+        return [e async for e in events]
+
+
+def tokens_of(events: list[StreamEvent]) -> str:
+    return "".join(e.data for e in events if e.type == "token")
+
+
+def done_of(events: list[StreamEvent]) -> Answer:
+    assert events[-1].type == "done"
+    return Answer.model_validate(events[-1].data)
+
+
+class ClosingLLM(FakeLLM):
+    """Streams a few tokens, then raises (or never ends); records whether it was closed."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        super().__init__()
+        self.closed = False
+        self.error = error
+
+    async def stream(self, prompt: str, system: str | None = None) -> AsyncIterator[str]:
+        self.prompts.append(prompt)
+        try:
+            for piece in ["Use ", "useState ", "[1]."]:
+                yield piece
+            if self.error is not None:
+                raise self.error
+            await asyncio.Event().wait()  # the model keeps going
+        finally:
+            self.closed = True
+
+
+async def test_stream_events_arrive_in_order(built: Any) -> None:
+    pipeline, _ = make(built)
+    events = await stream_events(pipeline)
+    kinds = [e.type for e in events]
+    assert kinds[0] == "retrieval"
+    assert kinds[-1] == "done"
+    assert set(kinds[1:-1]) == {"token"}
+    assert len(kinds) >= 4  # FakeLLM streams word by word
+
+
+async def test_stream_tokens_add_up_to_the_answer(built: Any) -> None:
+    pipeline, _ = make(built)
+    events = await stream_events(pipeline)
+    assert tokens_of(events) == FakeLLM.DEFAULT_ANSWER
+    done = done_of(events)
+    assert done.text == FakeLLM.DEFAULT_ANSWER
+    assert [c.number for c in done.citations] == [1, 2]
+
+
+async def test_stream_retrieval_event_lists_the_numbered_sources(built: Any) -> None:
+    pipeline, _ = make(built, rerank_top_n=3)
+    events = await stream_events(pipeline)
+    sources = events[0].data
+    assert [s["number"] for s in sources] == [1, 2, 3]  # the [n] the model will cite
+    assert all(s["url"].startswith("https://react.dev/") for s in sources)
+    done = done_of(events)
+    for c in done.citations:  # every citation points at a source the user already saw
+        assert sources[c.number - 1]["chunk_id"] == c.chunk_id
+
+
+async def test_stream_gives_the_same_answer_as_answer(built: Any) -> None:
+    streamed = done_of(await stream_events(make(built)[0]))
+    plain = await make(built)[0].answer(QUESTION)
+    assert (streamed.text, streamed.citations, streamed.abstained) == (
+        plain.text,
+        plain.citations,
+        plain.abstained,
+    )
+
+
+async def test_stream_records_time_to_first_token(built: Any) -> None:
+    pipeline, _ = make(built)
+    timings = done_of(await stream_events(pipeline)).timings
+    assert 0 < timings["ttft_ms"] <= timings["total_ms"]
+    assert timings["retrieval_ms"] <= timings["ttft_ms"]  # retrieval happens before any token
+    assert "generation_ms" in timings
+
+
+async def test_stream_saves_a_trace_with_ttft(built: Any) -> None:
+    store = TraceStore()
+    pipeline, _ = make(built, trace_store=store)
+    done = done_of(await stream_events(pipeline))
+    trace = store.get(done.trace_id)
+    assert "ttft_ms" in trace.timings
+    assert trace.answer == done.text
+
+
+async def test_stream_strips_invalid_citations_in_the_final_answer(built: Any) -> None:
+    pipeline, _ = make(built, llm=FakeLLM(responses=["Use useState [1] and magic [9]."]))
+    events = await stream_events(pipeline)
+    assert "[9]" in tokens_of(events)  # raw tokens go out as the model writes them
+    done = done_of(events)
+    assert "[9]" not in done.text  # the final answer is cleaned
+    assert [c.number for c in done.citations] == [1]
+
+
+async def test_a_streamed_answer_is_cached(built: Any) -> None:
+    pipeline, llm = make(built, cache=memory_cache())
+    await stream_events(pipeline)
+    again = await pipeline.answer(QUESTION)
+    assert again.cache_tier == "exact"
+    assert len(llm.prompts) == 1
+
+
+async def test_stream_replays_a_cache_hit_without_calling_the_llm(built: Any) -> None:
+    pipeline, llm = make(built, cache=memory_cache())
+    first = await pipeline.answer(QUESTION)
+    events = await stream_events(pipeline)
+    assert [e.type for e in events] == ["token", "done"]
+    assert events[0].data == first.text
+    assert done_of(events).cache_tier == "exact"
+    assert len(llm.prompts) == 1
+
+
+async def test_stream_bypass_cache_generates_again(built: Any) -> None:
+    pipeline, llm = make(built, cache=memory_cache())
+    await pipeline.answer(QUESTION)
+    events = await stream_events(pipeline, bypass_cache=True)
+    assert events[0].type == "retrieval"
+    assert done_of(events).cache_tier is None
+    assert len(llm.prompts) == 2
+
+
+async def test_stream_abstains_without_calling_the_llm(built: Any) -> None:
+    pipeline, llm = make(built, threshold=ALWAYS_ABSTAIN)
+    events = await stream_events(pipeline, "How do I write a computed property in Vue?")
+    assert [e.type for e in events] == ["token", "done"]
+    assert events[0].data == ABSTAIN_MESSAGE
+    assert done_of(events).abstained is True
+    assert llm.prompts == []
+
+
+async def test_stream_condenses_a_follow_up(built: Any) -> None:
+    llm = FakeLLM(responses=["How do I update an object in state?"])
+    pipeline, _ = make(built, llm=llm)
+    history = [
+        ChatMessage(role="user", content="How do I use useState?"),
+        ChatMessage(role="assistant", content="Call useState at the top level [1]."),
+    ]
+    done = done_of(await stream_events(pipeline, "what about objects?", history=history))
+    assert "condense_ms" in done.timings
+    assert "How do I update an object in state?" in llm.prompts[-1]
+
+
+async def test_stream_rejects_a_blank_question(built: Any) -> None:
+    pipeline, _ = make(built)
+    with pytest.raises(ValueError):
+        await stream_events(pipeline, "")
+
+
+async def test_stopping_the_stream_closes_the_llm_and_caches_nothing(built: Any) -> None:
+    """The user closed the tab mid-answer: stop generating, keep no half answer."""
+    llm = ClosingLLM()
+    cache = memory_cache()
+    pipeline, _ = make(built, llm=llm, cache=cache)
+    async with aclosing(pipeline.stream(QUESTION)) as events:
+        async for event in events:
+            if event.type == "token":
+                break
+    assert llm.closed
+    llm2 = FakeLLM()
+    pipeline.llm = llm2
+    later = await pipeline.answer(QUESTION)
+    assert later.cache_tier is None  # nothing was cached from the stopped stream
+    assert len(llm2.prompts) == 1
+
+
+async def test_an_llm_failure_mid_stream_propagates_and_caches_nothing(built: Any) -> None:
+    llm = ClosingLLM(error=LLMUnavailableError("ollama crashed"))
+    pipeline, _ = make(built, llm=llm, cache=memory_cache())
+    seen: list[StreamEvent] = []
+    with pytest.raises(LLMUnavailableError):
+        async with aclosing(pipeline.stream(QUESTION)) as events:
+            async for event in events:
+                seen.append(event)
+    assert [e.type for e in seen][-1] == "token"  # tokens arrived, then the failure
+    assert llm.closed
+    pipeline.llm = FakeLLM()
+    assert (await pipeline.answer(QUESTION)).cache_tier is None
 
 
 # =====================================================================

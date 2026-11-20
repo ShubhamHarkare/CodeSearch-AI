@@ -106,7 +106,7 @@ class StreamEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    type: Literal["retrieval", "token", "citations", "groundedness", "done", "error"]
+    type: Literal["retrieval", "token", "done", "error"]
     data: Any
 
 

@@ -4,7 +4,7 @@ What goes here:
     - ``OllamaLLM(model="gemma3:4b", base_url="http://localhost:11434", ...)``:
         * ``async generate(prompt, system=None) -> str`` via POST /api/generate
           (max_tokens is Ollama's ``num_predict``)
-        * ``async stream(prompt, system=None) -> AsyncIterator[str]``: yields text
+        * ``async stream(prompt, system=None) -> AsyncGenerator[str]``: yields text
           as it is generated; closing the iterator closes the upstream response
         * raises LLMTimeoutError / LLMUnavailableError from errors.py
     - ``FakeLLM(responses=None)``: deterministic, no network; by default returns
@@ -20,7 +20,7 @@ Phase: 1 (generate), 3 (stream + cancellation)
 """
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import httpx
@@ -47,7 +47,7 @@ class FakeLLM:
             return self.responses.pop(0)  # canned answers, in order
         return self.DEFAULT_ANSWER
 
-    async def stream(self, prompt: str, system: str | None = None) -> AsyncIterator[str]:
+    async def stream(self, prompt: str, system: str | None = None) -> AsyncGenerator[str]:
         answer = await self.generate(prompt, system)  # records the prompt too
         words = answer.split(" ")
         for i, word in enumerate(words):
@@ -113,7 +113,7 @@ class OllamaLLM:
             raise LLMUnavailableError(f"Unexpected reply from Ollama: {str(data)[:200]}")
         return str(data["response"])
 
-    async def stream(self, prompt: str, system: str | None = None) -> AsyncIterator[str]:
+    async def stream(self, prompt: str, system: str | None = None) -> AsyncGenerator[str]:
         """Yield the answer as Ollama produces it; closing the iterator closes the connection.
 
         Ollama sends one JSON object per line ({"response": "<text>", "done": false}),

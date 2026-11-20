@@ -1,11 +1,8 @@
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Generic, TypeVar
-
-T = TypeVar("T")
 
 
-class SingleFlight(Generic[T]):
+class SingleFlight[T]:
     """Run at most one call per key at a time; concurrent callers share its result."""
 
     def __init__(self) -> None:
