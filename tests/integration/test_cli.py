@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from codesearch.cli import app
 from codesearch.config import get_settings
+from codesearch.ingest.manifest import read_manifest
 from tests.conftest import FakeReactDev
 
 runner = CliRunner()
@@ -31,7 +32,8 @@ def test_ingest_builds_the_index_and_reports_it(env: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "Index built" in result.output
     assert "pages          22" in result.output
-    assert (env / "manifest.json").exists()
+    assert (env / "CURRENT").exists()  # the live build, under index/builds/
+    assert read_manifest(env) is not None
 
 
 def test_second_ingest_reports_no_changes(env: Path) -> None:
