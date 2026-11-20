@@ -21,6 +21,7 @@ from eval.loadtest import (
     run,
     run_load,
     send,
+    send_stream,
     summarize,
     write_report,
 )
@@ -340,3 +341,128 @@ async def test_burst_flags_a_run_served_from_the_cache() -> None:
     )
     assert "restart the API" in report["warning"]
     assert "WARNING" in format_summary(report)
+
+
+# =====================================================================
+# stream mode: client-side time to first token
+# =====================================================================
+
+
+def sse_body(*frames: tuple[str, Any]) -> bytes:
+    return "".join(f"event: {k}\ndata: {json.dumps(d)}\n\n" for k, d in frames).encode()
+
+
+GOOD_STREAM = sse_body(
+    ("retrieval", [{"number": 1}]),
+    ("token", "Use "),
+    ("token", "useState [1]."),
+    ("done", {"text": "Use useState [1].", "cache_tier": None, "timings": {}}),
+)
+
+
+class SlowStream(httpx.AsyncByteStream):
+    """A response body whose first token arrives only after a delay."""
+
+    def __init__(self, before: bytes, after: bytes, delay_s: float) -> None:
+        self.before, self.after, self.delay_s = before, after, delay_s
+
+    async def __aiter__(self) -> Any:
+        yield self.before
+        await asyncio.sleep(self.delay_s)
+        yield self.after
+
+
+async def test_send_stream_records_ttft_and_total() -> None:
+    before = sse_body(("retrieval", [{"number": 1}]))
+    after = GOOD_STREAM[len(before) :]
+
+    def api(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/ask/stream"
+        return httpx.Response(200, stream=SlowStream(before, after, delay_s=0.05))
+
+    async with client_for(api) as client:
+        outcome = await send_stream(client, {"question": "q"})
+    assert outcome.status == 200 and not outcome.failed
+    assert outcome.ttft_ms is not None and outcome.ttft_ms >= 50  # waited for the first token
+    assert outcome.latency_ms >= outcome.ttft_ms
+    assert outcome.cache_tier is None
+
+
+async def test_send_stream_reads_the_cache_tier_from_done() -> None:
+    body = sse_body(("token", "x"), ("done", {"cache_tier": "exact"}))
+    async with client_for(lambda r: httpx.Response(200, content=body)) as client:
+        outcome = await send_stream(client, {"question": "q"})
+    assert outcome.cache_tier == "exact"
+
+
+async def test_an_error_event_counts_as_a_failed_stream() -> None:
+    body = sse_body(("token", "x"), ("error", {"error": "down", "trace_id": "t"}))
+    async with client_for(lambda r: httpx.Response(200, content=body)) as client:
+        outcome = await send_stream(client, {"question": "q"})
+    assert outcome.failed
+    assert outcome.ttft_ms is not None  # tokens did arrive before the failure
+
+
+async def test_a_stream_without_done_counts_as_failed() -> None:
+    body = sse_body(("token", "x"))
+    async with client_for(lambda r: httpx.Response(200, content=body)) as client:
+        assert (await send_stream(client, {"question": "q"})).failed
+
+
+async def test_send_stream_http_error_and_no_response() -> None:
+    async with client_for(lambda r: httpx.Response(503, json={"error": "x"})) as client:
+        assert (await send_stream(client, {"question": "q"})).status == 503
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    async with client_for(refuse) as client:
+        assert (await send_stream(client, {"question": "q"})).status == 0
+
+
+def test_summarize_reports_ttft_and_excludes_failed_streams() -> None:
+    outcomes = [
+        Outcome(6000.0, 200, None, ttft_ms=800.0),
+        Outcome(7000.0, 200, None, ttft_ms=900.0),
+        Outcome(500.0, 200, None, ttft_ms=100.0, failed=True),
+    ]
+    s = summarize(outcomes, wall_s=13.0)
+    assert (s["ok"], s["errors"], s["failed_streams"]) == (2, 1, 1)
+    assert s["ttft_ms"] == {"p50": 800.0, "p90": 900.0, "max": 900.0}
+    assert "first token p50 800.0" in format_summary(
+        {"mode": "stream", "concurrency": 1, "summary": s}
+    )
+
+
+def test_summarize_without_streams_has_no_ttft() -> None:
+    s = summarize([Outcome(10.0, 200, "exact")], wall_s=1.0)
+    assert "ttft_ms" not in s and "failed_streams" not in s
+
+
+def test_stream_mode_payloads_bypass_the_cache() -> None:
+    payloads = payloads_for("stream", 3, 1, ["a", "b"], "n")
+    assert [p["question"] for p in payloads] == ["a", "b", "a"]
+    assert all(p["bypass_cache"] for p in payloads)
+
+
+async def test_stream_mode_warms_up_then_measures() -> None:
+    paths: list[str] = []
+
+    def api(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"versions": {}})
+        return httpx.Response(200, content=GOOD_STREAM)
+
+    report = await run(
+        "stream",
+        url=BASE,
+        requests=3,
+        concurrency=1,
+        timeout_s=5,
+        questions=["a"],
+        transport=httpx.MockTransport(api),
+    )
+    assert paths.count("/v1/ask/stream") == 4  # warm-up + 3 measured
+    assert report["summary"]["ok"] == 3
+    assert "ttft_ms" in report["summary"]

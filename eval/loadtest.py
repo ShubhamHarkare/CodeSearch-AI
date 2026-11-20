@@ -12,6 +12,10 @@ Three modes, one per question the numbers in the README have to answer:
            time drops to about one answer's latency. Valid only if the server has
            never answered that question: run it right after restarting the API (a
            warm-up request loads the models first). Cached results are flagged.
+    stream Golden questions over POST /v1/ask/stream with ``bypass_cache``: records
+           time to first token (TTFT) as the client sees it, next to the total.
+           Default concurrency 1: what one user waits for. Try -c 4 for TTFT
+           under load. One uncounted request first, so it measures a warm server.
     mixed  Misses as above while 5 workers keep asking a cached question. Reports
            the hits separately: if blocking work runs on the event loop, cache
            hits stall behind the misses even though they need no retrieval.
@@ -22,6 +26,7 @@ Usage, with the API running (``make serve``):
     uv run python -m eval.loadtest miss                # 20 requests, 4 at a time
     uv run python -m eval.loadtest burst               # 10 identical, all at once
     uv run python -m eval.loadtest mixed               # 8 misses, cache hits alongside
+    uv run python -m eval.loadtest stream              # 10 streamed answers, one at a time
     uv run python -m eval.loadtest hit -n 500 -c 20    # override the defaults
 
 Each run prints a summary and writes ``docs/loadtest/<mode>.json``. That folder is
@@ -37,6 +42,7 @@ import platform
 import subprocess
 import time
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,7 +53,7 @@ import typer
 
 from eval.golden import load_golden
 
-Mode = Literal["hit", "miss", "burst", "mixed"]
+Mode = Literal["hit", "miss", "burst", "mixed", "stream"]
 
 GOLDEN = Path("eval/golden.jsonl")
 OUT_DIR = Path("docs/loadtest")
@@ -60,6 +66,7 @@ DEFAULTS: dict[str, tuple[int, int]] = {
     "miss": (20, 4),
     "burst": (10, 10),
     "mixed": (8, 4),
+    "stream": (10, 1),
 }
 HIT_WORKERS = 5  # mixed mode: clients asking the cached question while misses run
 
@@ -71,6 +78,8 @@ class Outcome:
     latency_ms: float
     status: int  # HTTP status; 0 = no response (timeout or connection error)
     cache_tier: str | None = None  # "exact" | "semantic" | None (generated)
+    ttft_ms: float | None = None  # stream mode: when the first token arrived
+    failed: bool = False  # stream mode: an "error" event, or no "done" event
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -86,8 +95,19 @@ def percentile(values: list[float], q: float) -> float:
 
 def summarize(outcomes: list[Outcome], wall_s: float) -> dict[str, Any]:
     """Throughput and latency over the successful requests; errors counted apart."""
-    ok = [o for o in outcomes if 200 <= o.status < 300]
+    ok = [o for o in outcomes if 200 <= o.status < 300 and not o.failed]
     latencies = [o.latency_ms for o in ok]
+    ttfts = [o.ttft_ms for o in ok if o.ttft_ms is not None]
+    extra: dict[str, Any] = {}
+    if ttfts:
+        extra["ttft_ms"] = {
+            "p50": round(percentile(ttfts, 50), 1),
+            "p90": round(percentile(ttfts, 90), 1),
+            "max": round(max(ttfts), 1),
+        }
+    failed_streams = sum(o.failed for o in outcomes)
+    if failed_streams:
+        extra["failed_streams"] = failed_streams
     return {
         "requests": len(outcomes),
         "ok": len(ok),
@@ -105,6 +125,7 @@ def summarize(outcomes: list[Outcome], wall_s: float) -> dict[str, Any]:
             "mean": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
         },
         "cache_tiers": dict(Counter(o.cache_tier or "generated" for o in ok)),
+        **extra,
     }
 
 
@@ -116,7 +137,7 @@ def payloads_for(
         raise ValueError("requests and concurrency must be positive")
     if mode == "hit":
         return [{"question": HIT_QUESTION} for _ in range(requests)]
-    if mode in ("miss", "mixed"):
+    if mode in ("miss", "mixed", "stream"):
         if not questions:
             raise ValueError(f"{mode} mode needs at least one question")
         return [
@@ -145,15 +166,53 @@ async def send(client: httpx.AsyncClient, payload: dict[str, Any]) -> Outcome:
     return Outcome(latency_ms=latency_ms, status=response.status_code, cache_tier=tier)
 
 
+async def send_stream(client: httpx.AsyncClient, payload: dict[str, Any]) -> Outcome:
+    """POST one question to /v1/ask/stream; time the first token and the end. Never raises."""
+    start = time.perf_counter()
+    ttft_ms: float | None = None
+    kind = ""
+    done: dict[str, Any] | None = None
+    errored = False
+    try:
+        async with client.stream("POST", "/v1/ask/stream", json=payload) as response:
+            if not response.is_success:
+                await response.aread()
+                elapsed = (time.perf_counter() - start) * 1000
+                return Outcome(latency_ms=elapsed, status=response.status_code)
+            async for line in response.aiter_lines():
+                if line.startswith("event:"):
+                    kind = line[len("event:") :].strip()
+                elif line.startswith("data:"):
+                    if kind == "token" and ttft_ms is None:
+                        ttft_ms = (time.perf_counter() - start) * 1000
+                    elif kind == "done":
+                        done = json.loads(line[len("data:") :])
+                    elif kind == "error":
+                        errored = True
+            status = response.status_code
+    except (httpx.HTTPError, ValueError):
+        return Outcome(latency_ms=(time.perf_counter() - start) * 1000, status=0)
+    return Outcome(
+        latency_ms=(time.perf_counter() - start) * 1000,
+        status=status,
+        cache_tier=done.get("cache_tier") if done else None,
+        ttft_ms=ttft_ms,
+        failed=errored or done is None,
+    )
+
+
 async def run_load(
-    client: httpx.AsyncClient, payloads: list[dict[str, Any]], concurrency: int
+    client: httpx.AsyncClient,
+    payloads: list[dict[str, Any]],
+    concurrency: int,
+    sender: Callable[[httpx.AsyncClient, dict[str, Any]], Awaitable[Outcome]] = send,
 ) -> tuple[list[Outcome], float]:
     """Send every payload with at most ``concurrency`` in flight; return outcomes and wall time."""
     gate = asyncio.Semaphore(concurrency)
 
     async def one(payload: dict[str, Any]) -> Outcome:
         async with gate:
-            return await send(client, payload)
+            return await sender(client, payload)
 
     start = time.perf_counter()
     outcomes = await asyncio.gather(*(one(p) for p in payloads))
@@ -235,6 +294,9 @@ async def run(
         if mode == "hit":
             await send(client, payloads[0])  # warm the cache; not counted
             outcomes, wall_s = await run_load(client, payloads, concurrency)
+        elif mode == "stream":
+            await send_stream(client, payloads[0])  # load models, wake the LLM; not counted
+            outcomes, wall_s = await run_load(client, payloads, concurrency, send_stream)
         elif mode == "mixed":
             hit_payload = {"question": HIT_QUESTION}
             await send(client, hit_payload)  # warm the cache; not counted
@@ -277,12 +339,16 @@ def write_report(report: dict[str, Any], out_dir: Path = OUT_DIR) -> Path:
 
 def _lines(label: str, s: dict[str, Any]) -> str:
     lat = s["latency_ms"]
-    return (
+    text = (
         f"{label}: {s['ok']}/{s['requests']} ok\n"
         f"  throughput  {s['throughput_rps']} req/s over {s['wall_s']} s\n"
         f"  latency ms  p50 {lat['p50']}  p90 {lat['p90']}  p99 {lat['p99']}  max {lat['max']}\n"
-        f"  cache tiers {s['cache_tiers']}   status {s['status_counts']}"
     )
+    if ttft := s.get("ttft_ms"):
+        text += f"  first token p50 {ttft['p50']}  p90 {ttft['p90']}  max {ttft['max']}\n"
+    if s.get("failed_streams"):
+        text += f"  failed streams {s['failed_streams']}\n"
+    return text + f"  cache tiers {s['cache_tiers']}   status {s['status_counts']}"
 
 
 def format_summary(report: dict[str, Any]) -> str:
