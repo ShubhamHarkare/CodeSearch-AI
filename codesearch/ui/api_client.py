@@ -1,26 +1,22 @@
 """HTTP client the Streamlit UI uses to talk to the API.
 
-What goes here:
-    - ``ApiClient(base_url, timeout_s)`` (httpx):
-        * ``ask(question, history) -> dict``
-        * ``ask_stream(question, history) -> Iterator[StreamEvent]``: parse SSE
-          frames into typed events
-        * ``explain(trace_id)``, ``deep_explain(trace_id)``
-        * ``send_feedback(trace_id, vote, comment)``
-        * ``ready() -> dict`` and ``metrics_summary() -> dict`` for the sidebar
-    - Clear error messages when the API is down (show them in the UI, don't crash).
+``ApiClient`` wraps every endpoint the UI calls: ask, ask_stream (server-sent
+events), explain, deep_explain, ready, index_info. Every failure (API down, timeout,
+HTTP error, an ``error`` event mid-stream) becomes ``ApiError`` with a message fit
+to show users, so the UI never crashes on a network problem.
 
-Must not:
-    - import anything from codesearch except schemas.py.
-
-Tested by: tests/unit/test_api_client.py with httpx.MockTransport.
-Phase: 1, 3 (stream)
+It imports nothing from codesearch except schemas.py: the UI stays a pure HTTP
+client (tests/unit/test_api_client.py checks this).
 """
 
+import json
+from collections.abc import Iterator
 from types import TracebackType
 from typing import Any
 
 import httpx
+
+from codesearch.schemas import StreamEvent
 
 
 class ApiError(Exception):
@@ -114,7 +110,46 @@ class ApiClient:
         """
         return self._handle_response(self._request("POST", f"/v1/explain/{trace_id}/deep"))
 
-    # Phase 3 (added with their endpoints): ask_stream, send_feedback, metrics_summary.
+    def ask_stream(
+        self,
+        question: str,
+        history: list[dict[str, str]] | None = None,
+        *,
+        bypass_cache: bool = False,
+    ) -> Iterator[StreamEvent]:
+        """POST /v1/ask/stream -> events as they arrive: retrieval, token..., done.
+
+        An ``error`` event, an HTTP error, a dropped connection, or a stream that ends
+        without ``done`` all raise ApiError, after yielding whatever arrived before.
+        """
+        payload = {"question": question, "history": history or [], "bypass_cache": bypass_cache}
+        try:
+            with self._http.stream("POST", "/v1/ask/stream", json=payload) as response:
+                if not response.is_success:
+                    response.read()  # a streamed response must be read before .json()
+                    self._handle_response(response)  # raises ApiError
+                trace_id = response.headers.get("X-Trace-Id")
+                for event in parse_sse(response.iter_lines()):
+                    if event.type == "error":
+                        data = event.data if isinstance(event.data, dict) else {}
+                        raise ApiError(
+                            data.get("error") or "The answer failed part-way through.",
+                            trace_id=data.get("trace_id") or trace_id,
+                        )
+                    yield event
+                    if event.type == "done":
+                        return
+        except httpx.TimeoutException as e:
+            raise ApiError(f"The API stopped responding for {self.timeout_s:g}s.") from e
+        except httpx.HTTPError as e:
+            raise ApiError(
+                f"Lost the connection to the API at {self.base_url}. Is `make serve` running?"
+            ) from e
+        except ValueError as e:  # bad JSON or an unknown event type
+            raise ApiError("The API sent an event this app can't read.") from e
+        raise ApiError("The answer stream ended before the answer was complete.")
+
+    # Phase 3 (added with their endpoints): send_feedback, metrics_summary.
 
     def close(self) -> None:
         self._http.close()
@@ -129,3 +164,27 @@ class ApiClient:
         tb: TracebackType | None,
     ) -> None:
         self.close()
+
+
+def parse_sse(lines: Iterator[str]) -> Iterator[StreamEvent]:
+    """Server-sent event lines -> StreamEvents. A blank line ends each event.
+
+    Only ``event:`` and ``data:`` fields are used; comments (``: ping``) and other
+    fields are skipped. ``data`` is JSON, so a token containing a newline arrives
+    escaped on one line.
+    """
+    kind: str | None = None
+    data: list[str] = []
+    for line in lines:
+        if line == "":
+            if kind is not None and data:
+                yield StreamEvent.model_validate(
+                    {"type": kind, "data": json.loads("\n".join(data))}
+                )
+            kind, data = None, []
+        elif line.startswith("event:"):
+            kind = line[len("event:") :].strip()
+        elif line.startswith("data:"):
+            data.append(line[len("data:") :].lstrip())
+    if kind is not None and data:  # a last event without its closing blank line
+        yield StreamEvent.model_validate({"type": kind, "data": json.loads("\n".join(data))})
