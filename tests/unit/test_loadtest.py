@@ -11,9 +11,11 @@ import httpx
 import pytest
 
 from eval.loadtest import (
+    BURST_QUESTION,
     HIT_QUESTION,
     Outcome,
     format_summary,
+    hits_until,
     payloads_for,
     percentile,
     run,
@@ -107,6 +109,8 @@ def test_burst_sends_one_new_question_concurrency_times() -> None:
     assert len({p["question"] for p in payloads}) == 1
     assert "20261120T1200" in payloads[0]["question"]  # never seen before, so not cached
     assert "bypass_cache" not in payloads[0]  # single-flight lives in the cache path
+    assert payloads[0]["question"].startswith(BURST_QUESTION)
+    assert BURST_QUESTION != HIT_QUESTION  # earlier hit runs must not have cached it
 
 
 def test_miss_needs_questions() -> None:
@@ -236,3 +240,103 @@ def test_write_report_and_summary(tmp_path: Path) -> None:
     assert json.loads(path.read_text())["summary"]["ok"] == 1
     text = format_summary(report)
     assert "1/1 ok" in text and "p50 12.0" in text
+    assert "during the misses" not in text
+
+
+# =====================================================================
+# mixed mode
+# =====================================================================
+
+
+def test_mixed_sends_misses_like_miss_mode() -> None:
+    assert payloads_for("mixed", 3, 2, ["a"], "n") == payloads_for("miss", 3, 2, ["a"], "n")
+
+
+async def test_hits_until_stops_when_told() -> None:
+    stop = asyncio.Event()
+    sent = 0
+
+    async def api(request: httpx.Request) -> httpx.Response:
+        nonlocal sent
+        sent += 1
+        if sent >= 6:
+            stop.set()
+        await asyncio.sleep(0)
+        return answer("exact")
+
+    async with client_for(api) as client:
+        outcomes = await hits_until(client, {"question": "q"}, workers=2, stop=stop)
+    assert 6 <= len(outcomes) <= 7  # each worker finishes the request it had in flight
+
+
+async def test_mixed_reports_hits_and_misses_separately() -> None:
+    async def api(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"versions": {}})
+        body = json.loads(request.content)
+        if body.get("bypass_cache"):
+            await asyncio.sleep(0.03)  # a slow miss
+            return answer(None)
+        return answer("exact")  # a fast hit
+
+    report = await run(
+        "mixed",
+        url=BASE,
+        requests=4,
+        concurrency=2,
+        timeout_s=5,
+        questions=["a", "b"],
+        transport=httpx.MockTransport(api),
+    )
+    assert report["summary"]["requests"] == 4
+    assert report["summary"]["cache_tiers"] == {"generated": 4}
+    hits = report["hit_during_miss"]
+    assert hits["ok"] > 0
+    assert set(hits["cache_tiers"]) == {"exact"}
+    assert "during the misses" in format_summary(report)
+
+
+# =====================================================================
+# burst mode: warm-up and the "already cached" guard
+# =====================================================================
+
+
+def burst_api(tier: str | None, seen: list[dict[str, Any]]) -> httpx.MockTransport:
+    def api(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"versions": {}})
+        seen.append(json.loads(request.content))
+        return answer(tier)
+
+    return httpx.MockTransport(api)
+
+
+async def test_burst_warms_up_with_an_uncached_different_question() -> None:
+    seen: list[dict[str, Any]] = []
+    report = await run(
+        "burst",
+        url=BASE,
+        requests=1,
+        concurrency=3,
+        timeout_s=5,
+        questions=["warm-up question"],
+        transport=burst_api("shared", seen),
+    )
+    assert seen[0] == {"question": "warm-up question", "bypass_cache": True}
+    assert len(seen) == 4  # warm-up + 3 counted
+    assert report["summary"]["requests"] == 3
+    assert "warning" not in report
+
+
+async def test_burst_flags_a_run_served_from_the_cache() -> None:
+    report = await run(
+        "burst",
+        url=BASE,
+        requests=1,
+        concurrency=2,
+        timeout_s=5,
+        questions=["w"],
+        transport=burst_api("semantic", []),
+    )
+    assert "restart the API" in report["warning"]
+    assert "WARNING" in format_summary(report)

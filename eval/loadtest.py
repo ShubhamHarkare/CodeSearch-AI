@@ -9,13 +9,19 @@ Three modes, one per question the numbers in the README have to answer:
            question costs.
     burst  The same never-seen question sent C times at once. Without single-flight
            every copy calls the LLM; with it, one call serves all C, so the wall
-           time drops to about one answer's latency.
+           time drops to about one answer's latency. Valid only if the server has
+           never answered that question: run it right after restarting the API (a
+           warm-up request loads the models first). Cached results are flagged.
+    mixed  Misses as above while 5 workers keep asking a cached question. Reports
+           the hits separately: if blocking work runs on the event loop, cache
+           hits stall behind the misses even though they need no retrieval.
 
 Usage, with the API running (``make serve``):
 
     uv run python -m eval.loadtest hit                 # 2000 requests, 50 at a time
     uv run python -m eval.loadtest miss                # 20 requests, 4 at a time
     uv run python -m eval.loadtest burst               # 10 identical, all at once
+    uv run python -m eval.loadtest mixed               # 8 misses, cache hits alongside
     uv run python -m eval.loadtest hit -n 500 -c 20    # override the defaults
 
 Each run prints a summary and writes ``docs/loadtest/<mode>.json``. That folder is
@@ -41,13 +47,21 @@ import typer
 
 from eval.golden import load_golden
 
-Mode = Literal["hit", "miss", "burst"]
+Mode = Literal["hit", "miss", "burst", "mixed"]
 
 GOLDEN = Path("eval/golden.jsonl")
 OUT_DIR = Path("docs/loadtest")
 HIT_QUESTION = "How do I update state based on the previous state?"
+# Different from HIT_QUESTION, so hit/mixed runs can't have cached it (even semantically).
+BURST_QUESTION = "How do I keep a value between renders without causing a re-render?"
 # (requests, concurrency) when not given on the command line
-DEFAULTS: dict[str, tuple[int, int]] = {"hit": (2000, 50), "miss": (20, 4), "burst": (10, 10)}
+DEFAULTS: dict[str, tuple[int, int]] = {
+    "hit": (2000, 50),
+    "miss": (20, 4),
+    "burst": (10, 10),
+    "mixed": (8, 4),
+}
+HIT_WORKERS = 5  # mixed mode: clients asking the cached question while misses run
 
 
 @dataclass(frozen=True)
@@ -102,15 +116,15 @@ def payloads_for(
         raise ValueError("requests and concurrency must be positive")
     if mode == "hit":
         return [{"question": HIT_QUESTION} for _ in range(requests)]
-    if mode == "miss":
+    if mode in ("miss", "mixed"):
         if not questions:
-            raise ValueError("miss mode needs at least one question")
+            raise ValueError(f"{mode} mode needs at least one question")
         return [
             {"question": questions[i % len(questions)], "bypass_cache": True}
             for i in range(requests)
         ]
     # burst: one question nobody has asked before, sent `concurrency` times at once
-    question = f"{HIT_QUESTION} (load test {nonce})"
+    question = f"{BURST_QUESTION} (load test {nonce})"
     return [{"question": question} for _ in range(concurrency)]
 
 
@@ -146,6 +160,43 @@ async def run_load(
     return list(outcomes), time.perf_counter() - start
 
 
+async def hits_until(
+    client: httpx.AsyncClient, payload: dict[str, Any], workers: int, stop: asyncio.Event
+) -> list[Outcome]:
+    """Each worker re-sends ``payload`` back to back until ``stop`` is set."""
+    outcomes: list[Outcome] = []
+
+    async def worker() -> None:
+        while not stop.is_set():
+            outcomes.append(await send(client, payload))
+            await asyncio.sleep(0)  # yield, so an instant reply can't starve the misses
+
+    await asyncio.gather(*(worker() for _ in range(workers)))
+    return outcomes
+
+
+async def run_mixed(
+    client: httpx.AsyncClient,
+    miss_payloads: list[dict[str, Any]],
+    concurrency: int,
+    hit_payload: dict[str, Any],
+    hit_workers: int = HIT_WORKERS,
+) -> tuple[list[Outcome], list[Outcome], float]:
+    """Run the misses; keep sending cache hits until they finish. (misses, hits, wall_s)."""
+    stop = asyncio.Event()
+
+    async def misses() -> tuple[list[Outcome], float]:
+        try:
+            return await run_load(client, miss_payloads, concurrency)
+        finally:
+            stop.set()
+
+    (miss_outcomes, wall_s), hit_outcomes = await asyncio.gather(
+        misses(), hits_until(client, hit_payload, hit_workers, stop)
+    )
+    return miss_outcomes, hit_outcomes, wall_s
+
+
 def _git_sha() -> str | None:
     try:
         out = subprocess.run(
@@ -169,7 +220,8 @@ async def run(
     """One full load test against a running API. Returns the report."""
     nonce = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
     payloads = payloads_for(mode, requests, concurrency, questions, nonce)
-    limits = httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency)
+    pool = concurrency + HIT_WORKERS  # room for mixed mode's hit workers too
+    limits = httpx.Limits(max_connections=pool, max_keepalive_connections=pool)
     async with httpx.AsyncClient(
         base_url=url, timeout=timeout_s, limits=limits, transport=transport
     ) as client:
@@ -179,15 +231,35 @@ async def run(
             versions = ready.json().get("versions", {})
         except (httpx.HTTPError, ValueError):
             pass
+        extra: dict[str, Any] = {}
         if mode == "hit":
             await send(client, payloads[0])  # warm the cache; not counted
-        outcomes, wall_s = await run_load(client, payloads, concurrency)
+            outcomes, wall_s = await run_load(client, payloads, concurrency)
+        elif mode == "mixed":
+            hit_payload = {"question": HIT_QUESTION}
+            await send(client, hit_payload)  # warm the cache; not counted
+            outcomes, hits, wall_s = await run_mixed(client, payloads, concurrency, hit_payload)
+            extra["hit_during_miss"] = summarize(hits, wall_s)
+        else:
+            if mode == "burst" and questions:
+                # Load the models and wake the LLM on a different question, uncounted,
+                # so the burst measures sharing rather than a cold start.
+                await send(client, {"question": questions[0], "bypass_cache": True})
+            outcomes, wall_s = await run_load(client, payloads, concurrency)
+            if mode == "burst":
+                cached = {t for o in outcomes if (t := o.cache_tier) in ("exact", "semantic")}
+                if cached:
+                    extra["warning"] = (
+                        f"burst question was served from the cache ({sorted(cached)}): "
+                        "restart the API and run again for a valid result"
+                    )
 
     return {
         "mode": mode,
         "concurrency": concurrency,
         "url": url,
         "summary": summarize(outcomes, wall_s),
+        **extra,
         "versions": versions,
         "git_sha": _git_sha(),
         "machine": platform.platform(),
@@ -203,15 +275,25 @@ def write_report(report: dict[str, Any], out_dir: Path = OUT_DIR) -> Path:
     return path
 
 
-def format_summary(report: dict[str, Any]) -> str:
-    s = report["summary"]
+def _lines(label: str, s: dict[str, Any]) -> str:
     lat = s["latency_ms"]
     return (
-        f"{report['mode']}: {s['ok']}/{s['requests']} ok, concurrency {report['concurrency']}\n"
+        f"{label}: {s['ok']}/{s['requests']} ok\n"
         f"  throughput  {s['throughput_rps']} req/s over {s['wall_s']} s\n"
         f"  latency ms  p50 {lat['p50']}  p90 {lat['p90']}  p99 {lat['p99']}  max {lat['max']}\n"
         f"  cache tiers {s['cache_tiers']}   status {s['status_counts']}"
     )
+
+
+def format_summary(report: dict[str, Any]) -> str:
+    text = _lines(f"{report['mode']} (concurrency {report['concurrency']})", report["summary"])
+    if "warning" in report:
+        text += f"\n  WARNING: {report['warning']}"
+    if "hit_during_miss" in report:
+        text += "\n" + _lines(
+            f"cache hits during the misses ({HIT_WORKERS} workers)", report["hit_during_miss"]
+        )
+    return text
 
 
 def main(

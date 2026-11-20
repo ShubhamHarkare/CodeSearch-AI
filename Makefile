@@ -35,6 +35,7 @@ loadtest:
 	uv run python -m eval.loadtest hit
 	uv run python -m eval.loadtest miss
 	uv run python -m eval.loadtest burst
+	uv run python -m eval.loadtest mixed
 
 serve:
 	uv run uvicorn codesearch.api.main:create_app --factory --reload
