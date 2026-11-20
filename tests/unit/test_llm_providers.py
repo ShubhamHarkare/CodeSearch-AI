@@ -3,13 +3,16 @@
 The project runs fully on local models through Ollama (free, no API key).
 No network here: OllamaLLM gets an httpx.MockTransport (real requests, fake server).
 One test talks to a real local Ollama (marked needs_llm; needs `ollama serve` and
-the model pulled). Streaming (stream()) comes in Phase 3: skipped section at the end.
+the model pulled). Streaming tests use a fake NDJSON body that records being closed.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
 import httpx
@@ -182,10 +185,167 @@ async def test_real_ollama_answers() -> None:
 
 
 # =====================================================================
-# Phase 3: streaming (write stream() then remove the skip)
+# OllamaLLM.stream (Phase 3): NDJSON tokens, errors, and closing upstream on cancel
 # =====================================================================
 
 
-@pytest.mark.skip(reason="Phase 3: OllamaLLM.stream with cancellation")
-async def test_ollama_stream_closes_upstream_when_the_consumer_stops() -> None:
-    raise AssertionError
+class LineStream(httpx.AsyncByteStream):
+    """A streaming response body, one NDJSON line at a time. Records whether it was closed.
+
+    With ``hang=True`` it never ends after its lines: like a model still generating.
+    """
+
+    def __init__(self, lines: list[Any], hang: bool = False) -> None:
+        self.lines = lines
+        self.hang = hang
+        self.sent = 0
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for line in self.lines:
+            self.sent += 1
+            text = line if isinstance(line, str) else json.dumps(line)
+            yield (text + "\n").encode()
+        if self.hang:
+            await asyncio.Event().wait()  # never set: the "model" keeps going
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class StreamServer:
+    """Fake Ollama for streaming: answers every request with the given body or status."""
+
+    def __init__(
+        self, body: LineStream | None = None, status: int = 200, raise_exc: Exception | None = None
+    ) -> None:
+        self.body = body or LineStream([])
+        self.status = status
+        self.raise_exc = raise_exc
+        self.requests: list[httpx.Request] = []
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if self.raise_exc is not None:
+            raise self.raise_exc
+        return httpx.Response(self.status, stream=self.body)
+
+    def llm(self, **kwargs: Any) -> OllamaLLM:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+        return OllamaLLM(model="gemma3:4b", client=client, **kwargs)
+
+
+def token(text: str) -> dict[str, Any]:
+    return {"model": "gemma3:4b", "response": text, "done": False}
+
+
+DONE = {"model": "gemma3:4b", "response": "", "done": True, "eval_count": 3}
+
+
+async def collect(llm: OllamaLLM, prompt: str = "q", system: str | None = None) -> list[str]:
+    async with aclosing(llm.stream(prompt, system=system)) as tokens:
+        return [t async for t in tokens]
+
+
+async def test_stream_yields_tokens_in_order_and_stops_at_done() -> None:
+    server = StreamServer(LineStream([token("Use"), token(" useState"), token(" [1]."), DONE]))
+    assert await collect(server.llm()) == ["Use", " useState", " [1]."]
+
+
+async def test_stream_posts_a_streaming_request() -> None:
+    server = StreamServer(LineStream([token("a"), DONE]))
+    await collect(server.llm(temperature=0.2, max_tokens=50), prompt="P", system="S")
+    request = server.requests[0]
+    assert request.method == "POST"
+    assert request.url == "http://localhost:11434/api/generate"
+    body = json.loads(request.content)
+    assert body["stream"] is True
+    assert (body["prompt"], body["system"], body["model"]) == ("P", "S", "gemma3:4b")
+    assert body["options"] == {"temperature": 0.2, "num_predict": 50}
+
+
+async def test_stream_leaves_out_an_empty_system_prompt() -> None:
+    server = StreamServer(LineStream([DONE]))
+    await collect(server.llm(), system=None)
+    assert "system" not in json.loads(server.requests[0].content)
+
+
+async def test_stream_skips_blank_lines_and_empty_tokens() -> None:
+    server = StreamServer(LineStream(["", token(""), token("x"), "   ", DONE]))
+    assert await collect(server.llm()) == ["x"]
+
+
+async def test_stream_ignores_anything_after_done() -> None:
+    server = StreamServer(LineStream([token("a"), DONE, token("late")]))
+    assert await collect(server.llm()) == ["a"]
+
+
+async def test_stream_error_line_is_unavailable() -> None:
+    server = StreamServer(LineStream([token("a"), {"error": "model 'gemma3:4b' not found"}]))
+    with pytest.raises(LLMUnavailableError, match="not found"):
+        await collect(server.llm())
+
+
+async def test_stream_malformed_line_is_unavailable() -> None:
+    server = StreamServer(LineStream(["{not json"]))
+    with pytest.raises(LLMUnavailableError):
+        await collect(server.llm())
+
+
+@pytest.mark.parametrize("status", [404, 500, 503])
+async def test_stream_http_error_status_is_unavailable(status: int) -> None:
+    server = StreamServer(status=status)
+    with pytest.raises(LLMUnavailableError):
+        await collect(server.llm())
+
+
+async def test_stream_connection_failure_is_unavailable() -> None:
+    server = StreamServer(raise_exc=httpx.ConnectError("refused"))
+    with pytest.raises(LLMUnavailableError):
+        await collect(server.llm())
+
+
+async def test_stream_timeout_is_a_timeout() -> None:
+    server = StreamServer(raise_exc=httpx.ReadTimeout("slow"))
+    with pytest.raises(LLMTimeoutError):
+        await collect(server.llm())
+
+
+async def test_stream_closes_upstream_when_the_consumer_stops() -> None:
+    """The user closed the tab after one token: Ollama's connection must close too."""
+    body = LineStream([token("first"), token("second")], hang=True)
+    server = StreamServer(body)
+    async with aclosing(server.llm().stream("q")) as tokens:
+        async for first in tokens:
+            assert first == "first"
+            break
+    assert body.closed
+
+
+async def test_stream_closes_upstream_when_the_task_is_cancelled() -> None:
+    """Cancelled while waiting for the next token (the model is still generating)."""
+    body = LineStream([token("first")], hang=True)
+    server = StreamServer(body)
+    got: list[str] = []
+
+    async def consume() -> None:
+        async with aclosing(server.llm().stream("q")) as tokens:
+            async for t in tokens:
+                got.append(t)
+
+    task = asyncio.create_task(consume())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert got == ["first"]  # now waiting on a model that never finishes
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert body.closed
+
+
+async def test_generate_still_works_after_the_refactor() -> None:
+    """generate() and stream() should build the same request body (stream flag aside)."""
+    server = OllamaServer()
+    llm = ollama(server)
+    assert await llm.generate("P", system="S") == "Local answer [1]."
+    assert json.loads(server.requests[0].content)["stream"] is False

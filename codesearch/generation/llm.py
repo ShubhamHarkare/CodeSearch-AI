@@ -4,8 +4,8 @@ What goes here:
     - ``OllamaLLM(model="gemma3:4b", base_url="http://localhost:11434", ...)``:
         * ``async generate(prompt, system=None) -> str`` via POST /api/generate
           (max_tokens is Ollama's ``num_predict``)
-        * ``async stream(prompt, system=None) -> AsyncIterator[str]`` (Phase 3):
-          yields tokens; closes the upstream response if the consumer stops
+        * ``async stream(prompt, system=None) -> AsyncIterator[str]``: yields text
+          as it is generated; closing the iterator closes the upstream response
         * raises LLMTimeoutError / LLMUnavailableError from errors.py
     - ``FakeLLM(responses=None)``: deterministic, no network; by default returns
       an answer that cites [1] and [2] so citation and groundedness code is
@@ -19,6 +19,7 @@ Tested by: tests/unit/test_llm.py (FakeLLM) and tests/unit/test_llm_providers.py
 Phase: 1 (generate), 3 (stream + cancellation)
 """
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -78,17 +79,21 @@ class OllamaLLM:
             self._client = httpx.AsyncClient()  # created on first use, then reused
         return self._client
 
-    async def generate(self, prompt: str, system: str | None = None) -> str:
-        """One complete answer from POST /api/generate (no streaming)."""
+    def _body(self, prompt: str, system: str | None, *, stream: bool) -> dict[str, Any]:
+        """The /api/generate request. stream=False: one JSON reply; True: one line per token."""
         body: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
-            "stream": False,  # one JSON reply instead of one line per token
+            "stream": stream,
             "options": {"temperature": self.temperature, "num_predict": self.max_tokens},
         }
         if system:
             body["system"] = system
+        return body
 
+    async def generate(self, prompt: str, system: str | None = None) -> str:
+        """One complete answer from POST /api/generate (no streaming)."""
+        body = self._body(prompt, system, stream=False)
         url = f"{self.base_url}/api/generate"
         try:
             response = await self._http().post(url, json=body, timeout=self.timeout_s)
@@ -109,6 +114,44 @@ class OllamaLLM:
         return str(data["response"])
 
     async def stream(self, prompt: str, system: str | None = None) -> AsyncIterator[str]:
-        """Phase 3: token streaming with cancellation."""
-        raise NotImplementedError("OllamaLLM.stream comes in Phase 3")
-        yield ""  # makes this an async generator, so the type matches the protocol
+        """Yield the answer as Ollama produces it; closing the iterator closes the connection.
+
+        Ollama sends one JSON object per line ({"response": "<text>", "done": false}),
+        ending with {"done": true}. If the consumer stops early (the user left), Python
+        closes this generator at its ``yield``: the ``async with`` then closes the HTTP
+        response, which tells Ollama to stop generating.
+        """
+        body = self._body(prompt, system, stream=True)
+        url = f"{self.base_url}/api/generate"
+        try:
+            async with self._http().stream(
+                "POST", url, json=body, timeout=self.timeout_s
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        raise LLMUnavailableError(
+                            f"Malformed line from Ollama: {line[:200]!r}"
+                        ) from e
+
+                    if "error" in data:
+                        raise LLMUnavailableError(f"Ollama error ({self.model}): {data['error']}")
+
+                    if chunk := data.get("response"):
+                        yield str(chunk)
+
+                    if data.get("done"):
+                        return
+        except httpx.TimeoutException as e:  # check before HTTPError: it's a subclass
+            raise LLMTimeoutError(
+                f"Ollama stopped sending within {self.timeout_s}s ({self.model})"
+            ) from e
+        except httpx.HTTPError as e:
+            raise LLMUnavailableError(
+                f"Ollama request failed ({self.model} at {self.base_url}): {e}. "
+                f"Is `ollama serve` running and the model pulled (`ollama pull {self.model}`)?"
+            ) from e

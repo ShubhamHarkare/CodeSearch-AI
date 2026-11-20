@@ -41,8 +41,9 @@ class LLM(Protocol):
         """Generate a complete response; ``system`` holds the rules (system message)."""
         ...
 
-    def stream(self, prompt: str) -> AsyncIterator[str]:
-        """Stream generated text tokens for a given prompt asynchronously."""
+    def stream(self, prompt: str, system: str | None = None) -> AsyncIterator[str]:
+        """Yield the answer's text piece by piece. Closing the iterator early (the
+        consumer stopped) must also stop the generation upstream."""
         ...
 
 
