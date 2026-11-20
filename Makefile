@@ -29,6 +29,13 @@ ablation:
 	if [ -n "$$failed" ]; then echo "FAILED:$$failed (table uses their previous results)"; fi
 	uv run python -m eval.ablation_table --write README.md
 
+# Throughput and latency per serving path; needs `make serve` running in another terminal.
+# Writes docs/loadtest/{hit,miss,burst}.json (committed, so README numbers can be re-run).
+loadtest:
+	uv run python -m eval.loadtest hit
+	uv run python -m eval.loadtest miss
+	uv run python -m eval.loadtest burst
+
 serve:
 	uv run uvicorn codesearch.api.main:create_app --factory --reload
 

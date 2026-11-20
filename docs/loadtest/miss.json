@@ -1,0 +1,33 @@
+{
+  "mode": "miss",
+  "concurrency": 4,
+  "url": "http://localhost:8000",
+  "summary": {
+    "requests": 20,
+    "ok": 20,
+    "errors": 0,
+    "status_counts": {
+      "200": 20
+    },
+    "wall_s": 88.531,
+    "throughput_rps": 0.23,
+    "latency_ms": {
+      "p50": 18699.3,
+      "p90": 20894.4,
+      "p99": 22441.6,
+      "max": 22441.6,
+      "mean": 16227.8
+    },
+    "cache_tiers": {
+      "generated": 20
+    }
+  },
+  "versions": {
+    "prompt_version": "3",
+    "index_version": "ac462615f149"
+  },
+  "git_sha": "85725a2",
+  "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "python": "3.13.5",
+  "at": "2026-11-20T18:04:15+00:00"
+}
