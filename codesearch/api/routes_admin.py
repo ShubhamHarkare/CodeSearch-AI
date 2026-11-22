@@ -15,11 +15,17 @@ Tested by: tests/integration/test_api.py.
 Phase: 3-4
 """
 
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Response
 
-from codesearch.api.deps import HandleDep, PipelineDep, SettingsDep
+from codesearch.api.deps import (
+    HandleDep,
+    PipelineDep,
+    ReindexerDep,
+    SettingsDep,
+    verify_webhook,
+)
 from codesearch.api.models import HealthStatus, IndexInfo
 from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.tiered import TieredCache
@@ -91,3 +97,19 @@ async def index_info(handle: HandleDep, pipeline: PipelineDep, settings: Setting
         prompt_version=pipeline.answer_prompt.version,
         image_sha=settings.image_sha,
     )
+
+
+@router.post("/v1/admin/reindex", status_code=202, dependencies=[Depends(verify_webhook)])
+async def reindex(runner: ReindexerDep) -> dict[str, str]:
+    """Start a rebuild, or queue one if a rebuild is running. Returns before it finishes.
+
+    202 Accepted: the work has started, not finished; GET this path to follow it.
+    verify_webhook runs first: a bad signature is a 401 and starts nothing.
+    """
+    return {"status": await runner.trigger("webhook")}
+
+
+@router.get("/v1/admin/reindex")
+async def reindex_status(runner: ReindexerDep) -> dict[str, Any]:
+    """Is a rebuild running, and how did the last one go? Read-only, so not signed."""
+    return runner.status()

@@ -20,6 +20,7 @@ create_app(fake settings).
 Phase: 1
 """
 
+import asyncio
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -29,6 +30,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from codesearch.api import routes_admin, routes_ask
+from codesearch.api.background import ReindexRunner, make_build, periodic
 from codesearch.config import Settings
 from codesearch.errors import CodeSearchError
 from codesearch.factory import build_pipeline
@@ -41,22 +43,32 @@ log = get_logger(__name__)
 
 
 def create_app(
-    settings: Settings | None = None, *, pipeline: AnswerPipeline | None = None
+    settings: Settings | None = None,
+    *,
+    pipeline: AnswerPipeline | None = None,
+    reindexer: ReindexRunner | None = None,
 ) -> FastAPI:
     settings = settings if settings is not None else Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Startup: runs once, before the first request.
         configure_logging()
         app.state.settings = settings
         app.state.pipeline = pipeline if pipeline is not None else build_pipeline(settings)
+        # Re-indexing swaps new builds into the same handle the pipeline reads from.
+        runner = reindexer or ReindexRunner(make_build(settings, app.state.pipeline.handle))
+        app.state.reindexer = runner
+        timer = None
+        hours = settings.admin.reindex_interval_hours
+        if settings.admin.follow_upstream and hours > 0:
+            timer = asyncio.create_task(periodic(runner, hours * 3600))
         log.info("Application startup complete")
-        # STARTUP (runs once, before the first request):
-        #   configure_logging()
-        #   app.state.settings = settings
-        #   app.state.pipeline = pipeline if given, else build_pipeline(settings)
-        yield
-        # SHUTDOWN (runs once when the server stops): just log for now
+        yield  # the app serves requests here
+        # Shutdown: stop the timer and any rebuild loop before the process exits.
+        if timer is not None:
+            timer.cancel()
+        await runner.stop()
         log.info("Application shutdown complete")
 
     app = FastAPI(title="CodeSearch AI", version="2.0", lifespan=lifespan)

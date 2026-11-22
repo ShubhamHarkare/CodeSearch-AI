@@ -12,7 +12,9 @@ class IndexSettings(BaseModel):
     """
 
     react_dev_repo: str = "https://github.com/reactjs/react.dev.git"
-    react_dev_sha: str = "046f17d04295ba047bb5739026b4ac3110f17028"
+    # A pinned commit keeps builds and evals reproducible; None means "latest main"
+    # (what background re-indexing uses when admin.follow_upstream is on).
+    react_dev_sha: str | None = "046f17d04295ba047bb5739026b4ac3110f17028"
     corpus_dir: Path = Path("data/")
     index_dir: Path = Path("index/")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -66,10 +68,11 @@ class MonitoringSettings(BaseModel):
 
 
 class AdminSettings(BaseModel):
-    """Administrative secrets and background task scheduling."""
+    """Re-indexing: the webhook secret and the background schedule."""
 
-    webhook_secret: SecretStr = SecretStr("")
-    reindex_interval_hours: int = 6
+    webhook_secret: SecretStr = SecretStr("")  # empty: the reindex webhook is disabled
+    follow_upstream: bool = False  # background re-indexing fetches the latest main
+    reindex_interval_hours: float = 6.0  # with follow_upstream; 0 turns the timer off
 
 
 class ExplainSettings(BaseModel):

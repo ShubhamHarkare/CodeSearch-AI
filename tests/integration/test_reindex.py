@@ -7,12 +7,19 @@ old snapshot keeps a complete, unchanged index, and a failed build changes nothi
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import numpy as np
 import pytest
+from fastapi import FastAPI
 from numpy.typing import NDArray
 
+from codesearch.api.main import create_app
 from codesearch.config import Settings
 from codesearch.factory import load_index
 from codesearch.index.embedder import HashEmbedder
@@ -226,3 +233,59 @@ def test_an_index_built_in_the_old_layout_still_loads_and_upgrades(
     reopened = IndexSnapshot.open(index_dir)
     assert reopened is not None
     assert VectorStore(live_dir(index_dir) / "chroma").count() == report.chunks
+
+
+# =====================================================================
+# The Phase 3 gate: edit a doc upstream, call the webhook, the answer changes
+# =====================================================================
+
+SECRET = "s3cret"
+
+
+@asynccontextmanager
+async def serve(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    transport = httpx.ASGITransport(app=app)
+    async with (
+        app.router.lifespan_context(app),
+        httpx.AsyncClient(transport=transport, base_url="http://test") as client,
+    ):
+        yield client
+
+
+def signed(body: bytes) -> dict[str, str]:
+    digest = hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return {"X-Hub-Signature-256": f"sha256={digest}", "Content-Type": "application/json"}
+
+
+async def test_a_doc_edit_reaches_answers_after_the_webhook(
+    settings: Settings, fake_react_dev: FakeReactDev, tmp_path: Path
+) -> None:
+    cfg = at(settings, fake_react_dev).with_overrides(
+        admin={"webhook_secret": SECRET, "follow_upstream": True, "reindex_interval_hours": 0},
+        retrieval={"mode": "hybrid", "abstain_threshold": -2.0},  # always answer
+        cache={"enabled": False},
+        explain={"trace_db": tmp_path / "traces.db", "groundedness": False},
+    )
+    build_index(cfg, HashEmbedder())  # the index the server starts with (pinned commit)
+    app = create_app(cfg)
+    question = {"question": "What is the quokkastate zanzibar counter?"}
+
+    async with serve(app) as c:
+        before = (await c.get("/readyz")).json()["versions"]["index_version"]
+
+        edit_page(fake_react_dev)  # a new commit on upstream main
+        body = b'{"ref": "refs/heads/main"}'
+        r = await c.post("/v1/admin/reindex", content=body, headers=signed(body))
+        assert r.status_code == 202
+        await app.state.reindexer.wait()
+
+        status = (await c.get("/v1/admin/reindex")).json()
+        assert status["last_error"] is None
+        assert status["last_report"]["corpus_sha"] == fake_react_dev.head  # followed main
+        after = (await c.get("/readyz")).json()["versions"]["index_version"]
+        assert after != before  # new cache keys: no stale answers
+
+        answer = (await c.post("/v1/ask", json=question)).json()
+        trace = (await c.get(f"/v1/explain/{answer['trace_id']}")).json()
+    texts = [candidate["chunk"]["text"] for candidate in trace["candidates"]]
+    assert any(NEW_SENTENCE in text for text in texts)  # the edited page is retrieved now
