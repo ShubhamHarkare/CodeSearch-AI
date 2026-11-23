@@ -860,3 +860,30 @@ async def test_feedback_is_counted_in_the_metrics(built: Any) -> None:
         await c.post("/v1/feedback", json={"trace_id": trace_id, "vote": -1})
         text = (await c.get("/metrics")).text
     assert metric(text, 'codesearch_feedback_total{vote="down"}') == 1.0
+
+
+# =====================================================================
+# Startup: the models load before the first request
+# =====================================================================
+
+
+class WarmRecorder:
+    """Stands in for a real model: records when warm_up() ran."""
+
+    def __init__(self, log: list[str], name: str) -> None:
+        self.log = log
+        self.name = name
+
+    def warm_up(self) -> None:
+        self.log.append(f"warm {self.name}")
+
+
+async def test_models_are_warmed_before_the_first_request(built: Any) -> None:
+    settings, pipeline = make_pipeline(built)
+    events: list[str] = []
+    pipeline.grounder = WarmRecorder(events, "nli")  # groundedness is off in these tests
+    async with serve(create_app(settings, pipeline=pipeline)) as c:
+        events.append("first request")
+        r = await c.get("/readyz")
+    assert r.status_code == 200
+    assert events == ["warm nli", "first request"]  # loaded once, before traffic

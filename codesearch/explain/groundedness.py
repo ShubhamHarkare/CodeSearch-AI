@@ -203,3 +203,7 @@ class NLIScorer:
         p = np.exp(z) / np.exp(z).sum(axis=1, keepdims=True)
 
         return [float(x) for x in p[:, self.entailment_index]]
+
+    def warm_up(self) -> None:  # ← NEW
+        """Load the NLI model and run one prediction, before the first request."""
+        self.entailment([("warm up", "warm up")])
