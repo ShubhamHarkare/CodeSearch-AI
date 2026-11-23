@@ -41,6 +41,7 @@ from codesearch.monitoring.drift import DriftTracker, reference_questions
 from codesearch.monitoring.feedback import FeedbackStore
 from codesearch.monitoring.prometheus import Monitor
 from codesearch.pipeline import AnswerPipeline
+from codesearch.warmup import warm_up
 
 TRACE_HEADER = "X-Trace-Id"
 _SAFE_TRACE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -79,6 +80,9 @@ def create_app(
         configure_logging()
         app.state.settings = settings
         app.state.pipeline = pipeline if pipeline is not None else build_pipeline(settings)
+        # Load the models now, off the event loop, before any request is accepted.
+        seconds = await asyncio.to_thread(warm_up, app.state.pipeline)
+        log.info("models.ready", **seconds)
         # Re-indexing swaps new builds into the same handle the pipeline reads from.
         runner = reindexer or ReindexRunner(make_build(settings, app.state.pipeline.handle))
         app.state.reindexer = runner
