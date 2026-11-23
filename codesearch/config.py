@@ -65,6 +65,8 @@ class MonitoringSettings(BaseModel):
 
     window_size: int = 500
     drift_threshold: float = 0.2
+    reference_questions: Path = Path("eval/golden.jsonl")
+    drift_min_questions: int = 20
 
 
 class AdminSettings(BaseModel):

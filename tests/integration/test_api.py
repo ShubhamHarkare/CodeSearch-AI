@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -42,6 +43,7 @@ from codesearch.generation.prompts import load_prompt
 from codesearch.index.embedder import HashEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
 from codesearch.ingest.build import IngestReport, build_index
+from codesearch.monitoring.feedback import FeedbackStore
 from codesearch.pipeline import AnswerPipeline
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE
 from codesearch.retrieval.hybrid import HybridRetriever
@@ -741,3 +743,120 @@ async def test_metrics_work_before_the_index_is_loaded(client: Client) -> None:
         r = await c.get("/metrics")
     assert r.status_code == 200
     assert "codesearch_index_info{" not in r.text
+
+
+# =====================================================================
+# Drift gauge and GET /v1/admin/gaps
+# =====================================================================
+
+
+def monitored(built: Any, *, threshold: float = ALWAYS_ANSWER) -> Any:
+    settings, pipeline = make_pipeline(built, threshold=threshold)
+    settings = settings.with_overrides(
+        admin={"webhook_secret": SECRET}, monitoring={"drift_min_questions": 2}
+    )
+    return serve(create_app(settings, pipeline=pipeline))
+
+
+async def test_metrics_report_query_drift_once_there_are_enough_questions(built: Any) -> None:
+    async with monitored(built) as c:
+        before = (await c.get("/metrics")).text
+        await c.post("/v1/ask", json={"question": QUESTION})
+        await c.post("/v1/ask", json={"question": "When should I use useEffect?"})
+        after = (await c.get("/metrics")).text
+    assert math.isnan(metric(before, "codesearch_query_drift"))  # no data yet
+    drift = metric(after, "codesearch_query_drift")
+    assert 0.0 <= drift <= 2.0
+
+
+async def test_gaps_need_the_signature(built: Any) -> None:
+    async with monitored(built) as c:
+        r = await c.get("/v1/admin/gaps")
+    assert r.status_code == 401  # real user questions are not public
+
+
+async def test_gaps_cluster_the_abstained_questions(built: Any) -> None:
+    off_topic = ["How do I bake bread?", "How do I bake a cake?", "What is the capital of France?"]
+    async with monitored(built, threshold=ALWAYS_ABSTAIN) as c:
+        for q in off_topic:
+            await c.post("/v1/ask", json={"question": q})
+        r = await c.get("/v1/admin/gaps?k=2", headers=signed(b""))
+    assert r.status_code == 200
+    gaps = r.json()
+    assert sum(g["size"] for g in gaps) == 3
+    assert {q for g in gaps for q in g["examples"]} == set(off_topic)
+
+
+async def test_gaps_ignore_answered_questions(built: Any) -> None:
+    async with monitored(built) as c:
+        await c.post("/v1/ask", json={"question": QUESTION})
+        r = await c.get("/v1/admin/gaps", headers=signed(b""))
+    assert r.json() == []
+
+
+# =====================================================================
+# POST /v1/feedback
+# =====================================================================
+
+
+def with_feedback(built: Any, store: FeedbackStore) -> Any:
+    settings, pipeline = make_pipeline(built)
+    return serve(create_app(settings, pipeline=pipeline, feedback=store))
+
+
+async def test_feedback_on_an_answer_is_stored(built: Any) -> None:
+    store = FeedbackStore()
+    async with with_feedback(built, store) as c:
+        trace_id = (await c.post("/v1/ask", json={"question": QUESTION})).json()["trace_id"]
+        r = await c.post(
+            "/v1/feedback", json={"trace_id": trace_id, "vote": -1, "comment": "too vague"}
+        )
+    assert r.status_code == 204
+    assert r.content == b""
+    assert store.summary() == {"up": 0, "down": 1}
+    assert store.thumbs_down()[0].trace_id == trace_id
+    assert store.thumbs_down()[0].comment == "too vague"
+
+
+async def test_feedback_on_a_streamed_answer_is_stored(built: Any) -> None:
+    store = FeedbackStore()
+    async with with_feedback(built, store) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+        trace_id = r.headers["X-Trace-Id"]
+        r = await c.post("/v1/feedback", json={"trace_id": trace_id, "vote": 1})
+    assert r.status_code == 204
+    assert store.summary() == {"up": 1, "down": 0}
+
+
+async def test_feedback_on_an_unknown_answer_is_404(built: Any) -> None:
+    store = FeedbackStore()
+    async with with_feedback(built, store) as c:
+        r = await c.post("/v1/feedback", json={"trace_id": "never-asked", "vote": 1})
+    assert r.status_code == 404
+    assert len(store) == 0  # votes on made-up ids would skew the counts
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"trace_id": "x", "vote": 0},
+        {"trace_id": "x", "vote": 2},
+        {"trace_id": "x", "vote": "up"},
+        {"trace_id": "x"},
+        {"vote": 1},
+        {"trace_id": "x", "vote": 1, "comment": "a" * 501},
+        {"trace_id": "x", "vote": 1, "extra": True},
+    ],
+)
+async def test_a_malformed_vote_is_422(built: Any, body: dict[str, Any]) -> None:
+    async with with_feedback(built, FeedbackStore()) as c:
+        r = await c.post("/v1/feedback", json=body)
+    assert r.status_code == 422
+
+
+async def test_feedback_is_counted_in_the_metrics(built: Any) -> None:
+    async with with_feedback(built, FeedbackStore()) as c:
+        trace_id = (await c.post("/v1/ask", json={"question": QUESTION})).json()["trace_id"]
+        await c.post("/v1/feedback", json={"trace_id": trace_id, "vote": -1})
+        text = (await c.get("/metrics")).text
+    assert metric(text, 'codesearch_feedback_total{vote="down"}') == 1.0

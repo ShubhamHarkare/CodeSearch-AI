@@ -25,6 +25,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -34,7 +35,10 @@ from codesearch.api.background import ReindexRunner, make_build, periodic
 from codesearch.config import Settings
 from codesearch.errors import CodeSearchError
 from codesearch.factory import build_pipeline
+from codesearch.interfaces import Embedder
 from codesearch.log import bind_trace_id, configure_logging, get_logger, new_trace_id
+from codesearch.monitoring.drift import DriftTracker, reference_questions
+from codesearch.monitoring.feedback import FeedbackStore
 from codesearch.monitoring.prometheus import Monitor
 from codesearch.pipeline import AnswerPipeline
 
@@ -43,11 +47,29 @@ _SAFE_TRACE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 log = get_logger(__name__)
 
 
+def build_drift(settings: Settings, embedder: Embedder | None) -> DriftTracker | None:
+    """The query-drift tracker, or None when drift can't be measured (the gauge then shows NaN)."""
+    if embedder is None:
+        log.warning("no embedder; query drift disabled")
+        return None
+    questions = reference_questions(settings.monitoring.reference_questions)
+    if not questions:
+        log.warning("no reference questions; query drift disabled")
+        return None
+    return DriftTracker(embedder, questions, settings.monitoring.drift_min_questions)
+
+
+def feedback_path(settings: Settings) -> Path:
+    """Votes live next to the traces, so one volume holds all the app's SQLite files."""
+    return settings.explain.trace_db.parent / "feedback.db"
+
+
 def create_app(
     settings: Settings | None = None,
     *,
     pipeline: AnswerPipeline | None = None,
     reindexer: ReindexRunner | None = None,
+    feedback: FeedbackStore | None = None,
 ) -> FastAPI:
     settings = settings if settings is not None else Settings()
 
@@ -60,7 +82,14 @@ def create_app(
         # Re-indexing swaps new builds into the same handle the pipeline reads from.
         runner = reindexer or ReindexRunner(make_build(settings, app.state.pipeline.handle))
         app.state.reindexer = runner
-        app.state.monitor = Monitor(settings.monitoring.window_size, settings.retrieval.mode)
+        app.state.monitor = Monitor(
+            settings.monitoring.window_size,
+            settings.retrieval.mode,
+            drift=build_drift(settings, app.state.pipeline.embedder),
+        )
+        # Close the store on shutdown only if we opened it (a test may pass its own).
+        own_feedback = feedback is None
+        app.state.feedback = FeedbackStore(feedback_path(settings)) if own_feedback else feedback
         timer = None
         hours = settings.admin.reindex_interval_hours
         if settings.admin.follow_upstream and hours > 0:
@@ -71,6 +100,8 @@ def create_app(
         if timer is not None:
             timer.cancel()
         await runner.stop()
+        if own_feedback:
+            app.state.feedback.close()
         log.info("Application shutdown complete")
 
     app = FastAPI(title="CodeSearch AI", version="2.0", lifespan=lifespan)

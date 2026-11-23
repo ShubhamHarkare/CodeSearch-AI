@@ -1,5 +1,4 @@
 """User-facing endpoints. Each handler: validate, call the pipeline, shape the response.
-
 Endpoints:
     - ``POST /v1/ask`` -> AskResponse (JSON).
     - ``POST /v1/ask/stream`` -> text/event-stream; events in this order:
@@ -21,11 +20,11 @@ Phase: 1 (ask), 2 (explain), 3 (stream, feedback)
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import StreamingResponse
 
-from codesearch.api.deps import MonitorDep, PipelineDep, TraceStoreDep
-from codesearch.api.models import AskRequest, AskResponse, DeepExplainResponse
+from codesearch.api.deps import FeedbackStoreDep, MonitorDep, PipelineDep, TraceStoreDep
+from codesearch.api.models import AskRequest, AskResponse, DeepExplainResponse, FeedbackRequest
 from codesearch.api.sse import stream_response
 from codesearch.monitoring.prometheus import Monitor
 from codesearch.schemas import Answer, ExplanationTrace, StreamEvent
@@ -92,3 +91,13 @@ async def ask_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/feedback", status_code=204)
+async def feedback(
+    body: FeedbackRequest, store: FeedbackStoreDep, traces: TraceStoreDep, monitor: MonitorDep
+) -> Response:
+    traces.get(body.trace_id)  # unknown id -> TraceNotFoundError -> 404, nothing stored
+    store.add(body.trace_id, body.vote, body.comment)
+    monitor.metrics.observe_feedback(body.vote)
+    return Response(status_code=204)

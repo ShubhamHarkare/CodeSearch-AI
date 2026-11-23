@@ -81,3 +81,10 @@ class DeepExplainResponse(BaseModel):
 
     trace_id: str
     scores: dict[str, float]  # chunk_id -> share of the answer (sums to 1, or all 0)
+
+
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    trace_id: str = Field(min_length=1, max_length=64)
+    vote: Literal[1, -1]  # FastAPI turns 0 / 2 / "up" into a 422 for you
+    comment: str | None = Field(default=None, max_length=500)

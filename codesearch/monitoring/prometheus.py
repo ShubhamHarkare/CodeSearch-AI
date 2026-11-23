@@ -18,6 +18,7 @@ from prometheus_client import (
 )
 
 from codesearch.ingest.manifest import Manifest
+from codesearch.monitoring.drift import DriftTracker
 from codesearch.monitoring.windows import RollingWindow, signals_from_answer
 from codesearch.schemas import Answer, RequestSignals
 
@@ -42,6 +43,7 @@ class Metrics:
         self.http_requests = Counter(
             "codesearch_http_requests", "HTTP requests", ["method", "path", "status"], registry=r
         )
+        self.feedback = Counter("codesearch_feedback", "user feedback", ["vote"], registry=r)
         self.http_seconds = Histogram(
             "codesearch_http_request_seconds",
             "Time to response headers",
@@ -101,6 +103,12 @@ class Metrics:
             registry=r,
         )
 
+        self.query_drift = Gauge(
+            "codesearch_query_drift",
+            "Cosine distance between recent questions and the golden set (0 = same topics)",
+            registry=r,
+        )
+
     def observe_http(self, method: str, path: str, status: int, seconds: float) -> None:
         """One HTTP request, from the middleware."""
         self.http_requests.labels(method, path, str(status)).inc()
@@ -116,8 +124,15 @@ class Metrics:
         if s.retrieval_ms is not None:  # cache hits skip retrieval
             self.retrieval_seconds.observe(s.retrieval_ms / 1000)
 
+    def observe_feedback(self, vote: int) -> None:
+        self.feedback.labels("up" if vote > 0 else "down").inc()
+
     def refresh(
-        self, window: RollingWindow, manifest: Manifest | None, reindex: dict[str, Any] | None
+        self,
+        window: RollingWindow,
+        manifest: Manifest | None,
+        reindex: dict[str, Any] | None,
+        drift: float | None = None,
     ) -> None:
         """Set the gauges from current state; called by GET /metrics before rendering."""
         self.window_answers.set(len(window))
@@ -125,6 +140,7 @@ class Metrics:
             (self.abstain_rate, window.rate(lambda s: s.abstained)),
             (self.cache_hit_rate, window.rate(lambda s: s.cache_tier is not None)),
             (self.groundedness_median, window.percentile("groundedness", 50)),
+            (self.query_drift, drift),
         ):
             gauge.set(value if value is not None else float("nan"))  # NaN = "no data yet"
 
@@ -147,13 +163,16 @@ class Monitor:
     """One per app: the Prometheus metrics plus the rolling window.
 
     Routes call record(answer, question) once per finished answer; GET /metrics
-    calls metrics.refresh(window, ...) and metrics.render().
+    calls refresh(manifest, reindex) and metrics.render().
     """
 
-    def __init__(self, window_size: int = 500, retrieval_mode: str = "") -> None:
+    def __init__(
+        self, window_size: int = 500, retrieval_mode: str = "", drift: DriftTracker | None = None
+    ) -> None:
         self.metrics = Metrics()
         self.window = RollingWindow(window_size)
         self.retrieval_mode = retrieval_mode  # the same for every answer, so set once
+        self.drift = drift  # None: drift can't be measured, the gauge shows NaN
 
     def record(self, answer: Answer, question: str) -> RequestSignals:
         """Turn one answer into signals, keep them in the window, count them in the metrics."""
@@ -161,3 +180,8 @@ class Monitor:
         self.window.record(signals)  # feeds the rolling gauges (abstain rate, ...)
         self.metrics.observe(signals)  # counters and histograms, right away
         return signals  # returned so tests (and item 6's drift checks) can use it
+
+    def refresh(self, manifest: Manifest | None, reindex: dict[str, Any] | None) -> None:
+        """Compute drift, then set every gauge; called by GET /metrics."""
+        drift = self.drift.distance(self.window) if self.drift is not None else None
+        self.metrics.refresh(self.window, manifest, reindex, drift)

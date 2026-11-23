@@ -147,6 +147,41 @@ def render_message(msg: dict[str, Any]) -> None:
             if note:
                 st.caption(f":orange[:material/warning: {note}. See *Why this answer?*]")
             render_explanation(msg["trace_id"])
+            render_feedback(msg["trace_id"])
+
+
+def render_feedback(trace_id: str) -> None:
+    """Thumbs up / down under an answer; a thumbs down can carry an optional comment.
+
+    Streamlit reruns the script on every click, so remember what was already sent
+    and only POST when the vote or the comment changed.
+    """
+    choice = st.feedback("thumbs", key=f"fb_{trace_id}")  # None, 0 = down, 1 = up
+    if choice is None:
+        return
+    vote = 1 if choice == 1 else -1
+    comment = None
+    if vote == -1:
+        comment = (
+            st.text_input(
+                "What was wrong? (optional)",
+                key=f"fbc_{trace_id}",
+                max_chars=500,
+                placeholder="e.g. outdated API, wrong hook, missing example",
+            ).strip()
+            or None
+        )
+    sent: dict[str, tuple[int, str | None]] = st.session_state.setdefault("feedback_sent", {})
+    if sent.get(trace_id) == (vote, comment):
+        st.caption("Thanks for the feedback.")
+        return
+    try:
+        get_client().send_feedback(trace_id, vote, comment)
+    except ApiError as e:
+        st.caption(f":orange[:material/warning: Feedback not saved: {e}]")
+        return
+    sent[trace_id] = (vote, comment)
+    st.caption("Thanks for the feedback.")
 
 
 def render_explanation(trace_id: str) -> None:

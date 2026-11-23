@@ -15,9 +15,11 @@ Tested by: tests/integration/test_api.py.
 Phase: 3-4
 """
 
+import asyncio
+from dataclasses import asdict
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from codesearch.api.deps import (
     HandleDep,
@@ -31,6 +33,7 @@ from codesearch.api.models import HealthStatus, IndexInfo
 from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.errors import CacheUnavailableError
+from codesearch.monitoring.gaps import content_gaps
 from codesearch.monitoring.prometheus import CONTENT_TYPE
 
 router = APIRouter(tags=["admin"])
@@ -120,5 +123,21 @@ async def reindex_status(runner: ReindexerDep) -> dict[str, Any]:
 @router.get("/metrics")
 async def metrics(monitor: MonitorDep, handle: HandleDep, runner: ReindexerDep) -> Response:
     manifest = handle.snapshot().manifest if handle.ready else None
-    monitor.metrics.refresh(monitor.window, manifest, runner.status())
+    monitor.refresh(manifest, runner.status())
     return Response(monitor.metrics.render(), media_type=CONTENT_TYPE)
+
+
+@router.get("/v1/admin/gaps", dependencies=[Depends(verify_webhook)])
+async def gaps(
+    monitor: MonitorDep, pipeline: PipelineDep, k: int = Query(5, ge=1, le=10)
+) -> list[dict[str, Any]]:
+    """Topics users asked about that the app couldn't answer, biggest first.
+
+    Signed like the reindex webhook: the clusters contain raw user questions.
+    """
+    if pipeline.embedder is None:  # lexical-only mode: nothing to cluster with
+        return []
+    questions = [s.query for s in monitor.window.snapshot() if s.abstained]
+    # embedding + k-means are CPU-bound: run them off the event loop so /ask keeps serving
+    clusters = await asyncio.to_thread(content_gaps, questions, pipeline.embedder, k=k)
+    return [asdict(c) for c in clusters]

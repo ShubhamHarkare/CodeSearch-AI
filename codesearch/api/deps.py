@@ -23,6 +23,7 @@ from codesearch.config import Settings
 from codesearch.errors import InvalidWebhookError, TraceNotFoundError
 from codesearch.explain.trace import TraceStore
 from codesearch.index.handle import IndexHandle
+from codesearch.monitoring.feedback import FeedbackStore
 from codesearch.monitoring.prometheus import Monitor
 from codesearch.pipeline import AnswerPipeline
 
@@ -64,6 +65,11 @@ def get_monitor(request: Request) -> Monitor:
     return monitor
 
 
+def get_feedback_store(request: Request) -> FeedbackStore:
+    feedback: FeedbackStore = request.app.state.feedback
+    return feedback
+
+
 def check_signature(secret: str, body: bytes, header: str | None) -> None:
     """Raise InvalidWebhookError unless header == "sha256=" + HMAC-SHA256(secret, body).
 
@@ -100,3 +106,4 @@ HandleDep = Annotated[IndexHandle, Depends(get_index_handle)]
 TraceStoreDep = Annotated[TraceStore, Depends(get_trace_store)]
 ReindexerDep = Annotated[ReindexRunner, Depends(get_reindexer)]
 MonitorDep = Annotated[Monitor, Depends(get_monitor)]
+FeedbackStoreDep = Annotated[FeedbackStore, Depends(get_feedback_store)]

@@ -407,3 +407,28 @@ def test_parse_sse_handles_newlines_inside_json_and_comments() -> None:
 def test_parse_sse_accepts_a_last_event_without_a_blank_line() -> None:
     events = list(parse_sse(iter(["event: token", 'data: "x"'])))
     assert [(e.type, e.data) for e in events] == [("token", "x")]
+
+
+# =====================================================================
+# send_feedback
+# =====================================================================
+
+
+def test_feedback_posts_the_vote_and_comment() -> None:
+    api = Recorder(httpx.Response(204))
+    assert make(api).send_feedback("t-1", -1, "wrong hook") is None
+    assert api.requests[0].method == "POST"
+    assert api.requests[0].url == f"{BASE}/v1/feedback"
+    assert api.last_json == {"trace_id": "t-1", "vote": -1, "comment": "wrong hook"}
+
+
+def test_feedback_without_a_comment_leaves_it_out() -> None:
+    api = Recorder(httpx.Response(204))
+    make(api).send_feedback("t-1", 1)
+    assert api.last_json == {"trace_id": "t-1", "vote": 1}
+
+
+def test_feedback_on_an_unknown_answer_raises() -> None:
+    api = Recorder(httpx.Response(404, json={"error": "No such trace.", "trace_id": "r-9"}))
+    with pytest.raises(ApiError, match="No such trace"):
+        make(api).send_feedback("gone", 1)

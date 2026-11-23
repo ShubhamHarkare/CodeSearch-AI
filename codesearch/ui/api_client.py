@@ -149,7 +149,17 @@ class ApiClient:
             raise ApiError("The API sent an event this app can't read.") from e
         raise ApiError("The answer stream ended before the answer was complete.")
 
-    # Phase 3 (added with their endpoints): send_feedback, metrics_summary.
+    def send_feedback(self, trace_id: str, vote: int, comment: str | None = None) -> None:
+        """POST /v1/feedback. 204 has no body, so only an error response is parsed.
+
+        Voting again on the same trace_id replaces the earlier vote.
+        """
+        payload: dict[str, Any] = {"trace_id": trace_id, "vote": vote}
+        if comment:
+            payload["comment"] = comment
+        response = self._request("POST", "/v1/feedback", json=payload)
+        if not response.is_success:
+            self._handle_response(response)  # raises ApiError
 
     def close(self) -> None:
         self._http.close()
