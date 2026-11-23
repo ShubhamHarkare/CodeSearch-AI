@@ -23,6 +23,7 @@ from codesearch.config import Settings
 from codesearch.errors import InvalidWebhookError, TraceNotFoundError
 from codesearch.explain.trace import TraceStore
 from codesearch.index.handle import IndexHandle
+from codesearch.monitoring.prometheus import Monitor
 from codesearch.pipeline import AnswerPipeline
 
 SIGNATURE_HEADER = "X-Hub-Signature-256"  # how GitHub signs webhook deliveries
@@ -56,6 +57,11 @@ def get_trace_store(request: Request) -> TraceStore:
 def get_reindexer(request: Request) -> ReindexRunner:
     runner: ReindexRunner = request.app.state.reindexer
     return runner
+
+
+def get_monitor(request: Request) -> Monitor:
+    monitor: Monitor = request.app.state.monitor
+    return monitor
 
 
 def check_signature(secret: str, body: bytes, header: str | None) -> None:
@@ -93,3 +99,4 @@ PipelineDep = Annotated[AnswerPipeline, Depends(get_pipeline)]
 HandleDep = Annotated[IndexHandle, Depends(get_index_handle)]
 TraceStoreDep = Annotated[TraceStore, Depends(get_trace_store)]
 ReindexerDep = Annotated[ReindexRunner, Depends(get_reindexer)]
+MonitorDep = Annotated[Monitor, Depends(get_monitor)]

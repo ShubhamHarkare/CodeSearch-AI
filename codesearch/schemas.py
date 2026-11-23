@@ -122,7 +122,9 @@ class RequestSignals(BaseModel):
     latency_ms: float
     cache_tier: CacheTier | None = None
     abstained: bool
-    groundedness: float = Field(ge=0, le=1)
+    groundedness: float | None = Field(default=None, ge=0, le=1)  # None: not checked
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    retrieval_ms: float | None = None  # None on a cache hit
     top_score: float | None = None
     ttft_ms: float | None = None
     error: str | None = None

@@ -35,6 +35,7 @@ from codesearch.config import Settings
 from codesearch.errors import CodeSearchError
 from codesearch.factory import build_pipeline
 from codesearch.log import bind_trace_id, configure_logging, get_logger, new_trace_id
+from codesearch.monitoring.prometheus import Monitor
 from codesearch.pipeline import AnswerPipeline
 
 TRACE_HEADER = "X-Trace-Id"
@@ -59,6 +60,7 @@ def create_app(
         # Re-indexing swaps new builds into the same handle the pipeline reads from.
         runner = reindexer or ReindexRunner(make_build(settings, app.state.pipeline.handle))
         app.state.reindexer = runner
+        app.state.monitor = Monitor(settings.monitoring.window_size, settings.retrieval.mode)
         timer = None
         hours = settings.admin.reindex_interval_hours
         if settings.admin.follow_upstream and hours > 0:
@@ -98,6 +100,13 @@ def create_app(
             status=response.status_code,
             latency_ms=round((time.perf_counter() - start) * 1000, 1),
         )
+        monitor = getattr(request.app.state, "monitor", None)
+        if monitor is not None:
+            route = request.scope.get("route")
+            path = getattr(route, "path", "unmatched")
+            monitor.metrics.observe_http(
+                request.method, path, response.status_code, time.perf_counter() - start
+            )
         # 6. return response
         return response
 

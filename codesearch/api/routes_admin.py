@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, Response
 
 from codesearch.api.deps import (
     HandleDep,
+    MonitorDep,
     PipelineDep,
     ReindexerDep,
     SettingsDep,
@@ -30,6 +31,7 @@ from codesearch.api.models import HealthStatus, IndexInfo
 from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.errors import CacheUnavailableError
+from codesearch.monitoring.prometheus import CONTENT_TYPE
 
 router = APIRouter(tags=["admin"])
 CHANGELOG_TAIL = 5
@@ -113,3 +115,10 @@ async def reindex(runner: ReindexerDep) -> dict[str, str]:
 async def reindex_status(runner: ReindexerDep) -> dict[str, Any]:
     """Is a rebuild running, and how did the last one go? Read-only, so not signed."""
     return runner.status()
+
+
+@router.get("/metrics")
+async def metrics(monitor: MonitorDep, handle: HandleDep, runner: ReindexerDep) -> Response:
+    manifest = handle.snapshot().manifest if handle.ready else None
+    monitor.metrics.refresh(monitor.window, manifest, runner.status())
+    return Response(monitor.metrics.render(), media_type=CONTENT_TYPE)

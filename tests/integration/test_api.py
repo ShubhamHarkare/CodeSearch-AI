@@ -10,7 +10,10 @@ reindex webhook are added in later phases.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -20,6 +23,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from codesearch.api.background import ReindexRunner
 from codesearch.api.main import create_app
 from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.memory import LRUCache
@@ -28,6 +32,7 @@ from codesearch.config import Settings
 from codesearch.errors import (
     ExplainUnavailableError,
     IndexNotReadyError,
+    InvalidWebhookError,
     LLMUnavailableError,
     TraceNotFoundError,
 )
@@ -36,7 +41,7 @@ from codesearch.generation.llm import FakeLLM
 from codesearch.generation.prompts import load_prompt
 from codesearch.index.embedder import HashEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
-from codesearch.ingest.build import build_index
+from codesearch.ingest.build import IngestReport, build_index
 from codesearch.pipeline import AnswerPipeline
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE
 from codesearch.retrieval.hybrid import HybridRetriever
@@ -577,3 +582,162 @@ async def test_stream_without_an_index_reports_it_as_an_error_event(client: Clie
     assert sse_frames(r.text) == [
         ("error", {"error": IndexNotReadyError.public_message, "trace_id": r.headers["x-trace-id"]})
     ]
+
+
+# =====================================================================
+# POST / GET /v1/admin/reindex (signed webhook)
+# =====================================================================
+
+SECRET = "s3cret"
+REPORT = IngestReport(
+    corpus_sha="a" * 40,
+    index_version="v2",
+    pages=3,
+    chunks=10,
+    added=1,
+    removed=0,
+    unchanged=9,
+    full_rebuild=False,
+    duration_s=0.1,
+)
+
+
+def signed(body: bytes, secret: str = SECRET) -> dict[str, str]:
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return {"X-Hub-Signature-256": f"sha256={digest}", "Content-Type": "application/json"}
+
+
+class HeldBuild:
+    """A fake build that waits until released, so a second trigger finds it running."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.release = threading.Event()
+
+    def __call__(self) -> IngestReport:
+        self.calls += 1
+        self.release.wait(timeout=5)
+        return REPORT
+
+
+def admin_client(built: Any, secret: str = SECRET) -> tuple[Any, ReindexRunner, HeldBuild]:
+    settings, pipeline = make_pipeline(built)
+    settings = settings.with_overrides(admin={"webhook_secret": secret})
+    build = HeldBuild()
+    runner = ReindexRunner(build)
+    return serve(create_app(settings, pipeline=pipeline, reindexer=runner)), runner, build
+
+
+async def test_a_signed_webhook_starts_a_reindex_and_returns_202(built: Any) -> None:
+    client, runner, build = admin_client(built)
+    body = b'{"ref": "refs/heads/main"}'
+    async with client as c:
+        first = await c.post("/v1/admin/reindex", content=body, headers=signed(body))
+        second = await c.post("/v1/admin/reindex", content=body, headers=signed(body))
+        build.release.set()
+        await runner.wait()
+    assert (first.status_code, first.json()) == (202, {"status": "started"})
+    assert (second.status_code, second.json()) == (202, {"status": "queued"})
+    assert build.calls == 2
+
+
+async def test_a_bad_signature_is_401_and_starts_nothing(built: Any) -> None:
+    client, runner, build = admin_client(built)
+    body = b"{}"
+    async with client as c:
+        r = await c.post("/v1/admin/reindex", content=body, headers=signed(body, secret="guess"))
+    assert r.status_code == 401
+    assert r.json()["error"] == InvalidWebhookError.public_message
+    assert build.calls == 0 and runner.runs == 0
+
+
+async def test_a_missing_signature_is_401(built: Any) -> None:
+    client, _, build = admin_client(built)
+    async with client as c:
+        r = await c.post("/v1/admin/reindex", json={})
+    assert r.status_code == 401
+    assert build.calls == 0
+
+
+async def test_the_webhook_is_refused_when_no_secret_is_configured(built: Any) -> None:
+    client, _, build = admin_client(built, secret="")
+    body = b"{}"
+    async with client as c:
+        r = await c.post("/v1/admin/reindex", content=body, headers=signed(body, secret=""))
+    assert r.status_code == 401
+    assert "not enabled" in r.json()["error"]
+    assert build.calls == 0
+
+
+async def test_reindex_status_reports_the_last_run(built: Any) -> None:
+    client, runner, build = admin_client(built)
+    build.release.set()
+    body = b"{}"
+    async with client as c:
+        idle = (await c.get("/v1/admin/reindex")).json()
+        await c.post("/v1/admin/reindex", content=body, headers=signed(body))
+        await runner.wait()
+        done = (await c.get("/v1/admin/reindex")).json()
+    assert idle["running"] is False and idle["runs"] == 0
+    assert done["runs"] == 1 and done["last_reason"] == "webhook"
+    assert done["last_report"]["index_version"] == "v2"
+
+
+# =====================================================================
+# GET /metrics (Prometheus)
+# =====================================================================
+
+
+def metric(text: str, line_start: str) -> float:
+    """The value of the first exposition line starting with `line_start`."""
+    for line in text.splitlines():
+        if line.startswith(line_start):
+            return float(line.rsplit(" ", 1)[1])
+    raise AssertionError(f"no line starting with {line_start!r}")
+
+
+async def test_metrics_is_prometheus_text(client: Client) -> None:
+    async with client() as c:
+        r = await c.get("/metrics")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "# TYPE codesearch_answers_total counter" in r.text
+    assert "codesearch_index_chunks" in r.text
+
+
+async def test_metrics_count_answers_and_their_latency(client: Client) -> None:
+    async with client() as c:
+        await c.post("/v1/ask", json={"question": QUESTION})
+        await c.post("/v1/ask/stream", json={"question": QUESTION})
+        text = (await c.get("/metrics")).text
+    assert metric(text, 'codesearch_answers_total{abstained="false",cache_tier="generated"}') == 2
+    assert metric(text, "codesearch_ttft_seconds_count") == 1  # only the streamed one has a TTFT
+    assert metric(text, "codesearch_window_answers") == 2
+
+
+async def test_metrics_label_routes_by_template_not_by_value(client: Client) -> None:
+    """One series per route, not one per trace id: label cardinality stays bounded."""
+    async with client() as c:
+        await c.get("/v1/explain/abc")
+        await c.get("/v1/explain/def")
+        text = (await c.get("/metrics")).text
+    templated = (
+        'codesearch_http_requests_total{method="GET",path="/v1/explain/{trace_id}",status="404"}'
+    )
+    assert metric(text, templated) == 2
+    assert "/v1/explain/abc" not in text
+
+
+async def test_metrics_report_the_live_index(client: Client, built: Any) -> None:
+    _, snapshot = built
+    async with client() as c:
+        text = (await c.get("/metrics")).text
+    assert metric(text, "codesearch_index_chunks") == snapshot.manifest.chunk_count
+    assert f'index_version="{snapshot.manifest.index_version}"' in text
+
+
+async def test_metrics_work_before_the_index_is_loaded(client: Client) -> None:
+    async with client(handle=IndexHandle()) as c:
+        r = await c.get("/metrics")
+    assert r.status_code == 200
+    assert "codesearch_index_info{" not in r.text
