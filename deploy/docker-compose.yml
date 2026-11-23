@@ -1,13 +1,104 @@
-# TODO(v2): the local stack. Run with `make up`.
+# The whole stack on one machine: `make up` (from the repo root).
 #
-# services:
-#   api:        build ../ with deploy/Dockerfile; env_file ../.env; mounts ../index;
-#               depends_on redis (condition: service_healthy); port 8000
-#   ui:         same image, command: streamlit run codesearch/ui/streamlit_app.py;
-#               env API_URL=http://api:8000; port 8501
-#   redis:      redis:7-alpine, --maxmemory 256mb --maxmemory-policy allkeys-lru,
-#               healthcheck redis-cli ping; no host port needed
-#   prometheus: prom/prometheus with ./prometheus.yml (+ alert rules); port 9090
-#   grafana:    grafana/grafana with ./grafana provisioning; port 3000
-# No top-level "version:" key (obsolete).
-# Phase 3-4.
+#   http://localhost:8501   chat UI
+#   http://localhost:3000   Grafana (admin / GRAFANA_ADMIN_PASSWORD from .env)
+#   http://localhost:8000   API (localhost only; the UI reaches it inside the network)
+#   http://localhost:9090   Prometheus (localhost only)
+#
+# First run on a new machine: `make index` builds the search index into its volume.
+
+name: codesearch
+
+x-app: &app
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    args:
+      GIT_SHA: ${GIT_SHA:-unknown}
+  image: codesearch:latest
+  env_file: ../.env  # the LLM key and settings; never baked into the image
+  restart: unless-stopped
+
+services:
+  api:
+    <<: *app
+    environment:
+      CODESEARCH_CACHE__REDIS_URL: redis://redis:6379/0  # the service name, not localhost
+    volumes:
+      - index:/app/index    # the search index (built by `make index`)
+      - data:/app/data      # the react.dev checkout re-indexing reads
+      - traces:/app/traces  # traces + feedback (SQLite): survive restarts and redeploys
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  ui:
+    <<: *app
+    command:
+      - streamlit
+      - run
+      - codesearch/ui/streamlit_app.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --server.headless=true
+      - --browser.gatherUsageStats=false
+    environment:
+      CODESEARCH_API_URL: http://api:8000
+    ports:
+      - "8501:8501"
+    healthcheck:  # the image's check is for the API port; Streamlit has its own
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      api:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    # no ports: only the API talks to Redis, inside the compose network
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/codesearch.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+volumes:
+  index:
+  data:
+  traces:
+  prometheus:
+  grafana:

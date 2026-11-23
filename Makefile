@@ -1,4 +1,4 @@
-.PHONY: setup lint test ingest eval ablation serve ui up
+.PHONY: setup lint test ingest eval ablation serve ui up down index logs
 
 setup:
 	uv sync --all-extras
@@ -44,5 +44,19 @@ serve:
 ui:
 	uv run streamlit run codesearch/ui/streamlit_app.py
 
-up:
-	docker compose -f deploy/docker-compose.yml up --build
+# --- Docker: the whole stack (API, UI, Redis, Prometheus, Grafana) -------------
+# --env-file: compose reads ${VARS} from the repo's .env, not deploy/.env.
+COMPOSE = GIT_SHA=$$(git rev-parse --short HEAD) docker compose --env-file .env -f deploy/docker-compose.yml
+
+up:  ## build and start everything in the background
+	$(COMPOSE) up --build -d
+	@echo "UI http://localhost:8501   Grafana http://localhost:3000   API http://localhost:8000"
+
+down:  ## stop everything (volumes, so the index and traces, are kept)
+	$(COMPOSE) down
+
+index:  ## build or update the search index inside the stack (first run: a few minutes)
+	$(COMPOSE) run --rm api codesearch ingest
+
+logs:  ## follow the API's logs
+	$(COMPOSE) logs -f api
