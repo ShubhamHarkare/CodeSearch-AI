@@ -44,6 +44,8 @@ class Metrics:
             "codesearch_http_requests", "HTTP requests", ["method", "path", "status"], registry=r
         )
         self.feedback = Counter("codesearch_feedback", "user feedback", ["vote"], registry=r)
+        for vote in ("up", "down"):  # start both at 0, so increase() sees the first vote
+            self.feedback.labels(vote)
         self.http_seconds = Histogram(
             "codesearch_http_request_seconds",
             "Time to response headers",

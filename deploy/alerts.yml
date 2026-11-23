@@ -1,0 +1,41 @@
+# Alert rules, evaluated by Prometheus (Status -> Alerts at http://localhost:9090/alerts).
+# The gauges are NaN until there is enough traffic; NaN < x is false, so a quiet
+# service never alerts.
+groups:
+  - name: codesearch
+    rules:
+      - alert: GroundednessLow
+        # Answers are drifting away from their sources: more unsupported sentences.
+        expr: codesearch_groundedness_median < 0.7
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Median groundedness {{ $value | printf \"%.2f\" }} (< 0.70) for 15 minutes"
+          description: >-
+            Recent answers are less supported by the retrieved docs. Check a few in the UI's
+            "Why this answer?" panel, and whether a re-index or prompt change just shipped.
+
+      - alert: QueryDrift
+        # Users are asking about different things than the golden set covers.
+        expr: codesearch_query_drift > 0.2
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Query drift {{ $value | printf \"%.2f\" }} (> 0.20) for 30 minutes"
+          description: >-
+            The eval numbers may no longer describe real traffic. Look at GET /v1/admin/gaps
+            and add the new topics to eval/golden.jsonl.
+
+      - alert: LLMRateLimited
+        # Groq's free tier caps requests and tokens per minute; users see "busy, try again".
+        expr: sum(increase(codesearch_http_requests_total{status="429"}[10m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | printf \"%.0f\" }} answers refused (HTTP 429) in 10 minutes"
+          description: >-
+            The hosted LLM's quota is being hit. Options: lower llm.max_tokens, fewer chunks
+            in the prompt, a larger plan, or a second provider.
