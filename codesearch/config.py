@@ -41,12 +41,15 @@ class RetrievalSettings(BaseModel):
 class LLMSettings(BaseModel):
     """LLM provider and inference configurations."""
 
-    provider: Literal["ollama", "fake"] = "fake"
+    provider: Literal["ollama", "openai", "fake"] = "fake"  # openai = any OpenAI-compatible API
     model: str = "gemma3:4b"
     temperature: float = 0.0
     max_tokens: int = 1024
     timeout_s: float = 120.0  # local models on a laptop CPU/GPU can take a while
     ollama_base_url: str = "http://localhost:11434"
+    openai_base_url: str = "https://api.groq.com/openai/v1"
+    api_key: SecretStr = SecretStr("")  # from CODESEARCH_LLM__API_KEY, never in the repo
+    reasoning_effort: Literal["low", "medium", "high"] | None = None  # gpt-oss: keep thinking short
 
 
 class CacheSettings(BaseModel):

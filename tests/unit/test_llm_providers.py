@@ -155,9 +155,9 @@ def test_llm_defaults_are_local() -> None:
     assert llm.ollama_base_url == "http://localhost:11434"
 
 
-def test_factory_rejects_groq_now_that_the_project_is_local_only() -> None:
+def test_factory_rejects_an_unknown_provider() -> None:
     with pytest.raises(ValidationError):
-        settings(provider="groq")
+        settings(provider="groq")  # hosted APIs go through provider="openai" (compatible API)
 
 
 def test_factory_builds_ollama_from_settings() -> None:

@@ -31,7 +31,7 @@ from codesearch.config import Settings
 from codesearch.explain.calibration import Calibrator
 from codesearch.explain.groundedness import NLIScorer
 from codesearch.explain.trace import TraceStore
-from codesearch.generation.llm import FakeLLM, OllamaLLM
+from codesearch.generation.llm import FakeLLM, OllamaLLM, OpenAICompatLLM
 from codesearch.generation.prompts import load_prompt
 from codesearch.index.embedder import HashEmbedder, SentenceTransformerEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
@@ -73,6 +73,17 @@ def build_llm(settings: Settings) -> LLM:
             temperature=llm.temperature,
             max_tokens=llm.max_tokens,
             timeout_s=llm.timeout_s,
+        )
+
+    if llm.provider == "openai":
+        return OpenAICompatLLM(
+            llm.model,
+            llm.api_key.get_secret_value(),
+            llm.openai_base_url,
+            temperature=llm.temperature,
+            max_tokens=llm.max_tokens,
+            timeout_s=llm.timeout_s,
+            reasoning_effort=llm.reasoning_effort,
         )
     return FakeLLM()
 

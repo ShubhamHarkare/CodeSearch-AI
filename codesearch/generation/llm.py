@@ -25,7 +25,7 @@ from typing import Any
 
 import httpx
 
-from codesearch.errors import LLMTimeoutError, LLMUnavailableError
+from codesearch.errors import LLMRateLimitedError, LLMTimeoutError, LLMUnavailableError
 
 
 class FakeLLM:
@@ -155,3 +155,120 @@ class OllamaLLM:
                 f"Ollama request failed ({self.model} at {self.base_url}): {e}. "
                 f"Is `ollama serve` running and the model pulled (`ollama pull {self.model}`)?"
             ) from e
+
+
+class OpenAICompatLLM:
+    """Any server speaking the OpenAI chat-completions API (Groq, OpenRouter, vLLM, ...)."""
+
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: str = "https://api.groq.com/openai/v1",
+        *,
+        temperature: float = 0.0,
+        max_tokens: int = 1024,
+        timeout_s: float = 60.0,
+        client: httpx.AsyncClient | None = None,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        if not api_key:
+            raise ValueError("an API key is required (set CODESEARCH_LLM__API_KEY)")
+        self.model = model
+        self.base_url = base_url.rstrip("/")
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.timeout_s = timeout_s
+        self._key = api_key
+        self._client = client
+        self.reasoning_effort = reasoning_effort
+
+    def _http(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient()  # created on first use, then reused
+        return self._client
+
+    def _body(self, prompt: str, system: str | None, *, stream: bool) -> dict[str, Any]:
+        """The chat-completions request: the rules as the system message, then the prompt."""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "stream": stream,
+        }
+        if self.reasoning_effort:
+            body["reasoning_effort"] = self.reasoning_effort
+        return body
+
+    def _check(self, response: httpx.Response) -> None:
+        """Raise the matching error for a non-2xx response (never the body: it can echo the key)."""
+        if response.status_code == 429:
+            wait = response.headers.get("retry-after")  # e.g. "7", or None if Groq didn't send it
+            message = f"{self.model}: rate limited"
+            if wait:
+                message += f", retry after {wait}s"
+            raise LLMRateLimitedError(message)
+        if response.status_code in (401, 403):
+            raise LLMUnavailableError(f"{self.model}: the API key was rejected")
+        if not response.is_success:
+            raise LLMUnavailableError(f"{self.model}: HTTP {response.status_code}")
+
+    async def generate(self, prompt: str, system: str | None = None) -> str:
+        """One complete answer from POST /chat/completions (no streaming)."""
+        body = self._body(prompt, system, stream=False)
+        try:
+            response = await self._http().post(
+                f"{self.base_url}/chat/completions",
+                json=body,
+                headers={"Authorization": f"Bearer {self._key}"},
+                timeout=self.timeout_s,
+            )
+        except httpx.TimeoutException as e:  # check before HTTPError: it's a subclass
+            raise LLMTimeoutError(f"{self.model} did not answer within {self.timeout_s}s") from e
+        except httpx.HTTPError as e:
+            raise LLMUnavailableError(f"{self.model} at {self.base_url}: {type(e).__name__}") from e
+        self._check(response)
+
+        try:
+            # content can be null: `or ""` inside str(), so None doesn't become "None"
+            return str(response.json()["choices"][0]["message"]["content"] or "")
+        except (ValueError, KeyError, IndexError, TypeError) as e:
+            raise LLMUnavailableError(f"{self.model}: unexpected reply shape") from e
+
+    async def stream(self, prompt: str, system: str | None = None) -> AsyncGenerator[str]:
+        """Yield the answer as Groq produces it; closing the iterator closes the connection."""
+        body = self._body(prompt, system, stream=True)  # (1)
+        try:
+            async with self._http().stream(  # (2)
+                "POST",
+                f"{self.base_url}/chat/completions",
+                json=body,
+                headers={"Authorization": f"Bearer {self._key}"},
+                timeout=self.timeout_s,
+            ) as response:
+                self._check(response)  # (3)
+                async for line in response.aiter_lines():  # (4)
+                    if not line.startswith("data:"):  # (5)
+                        continue
+                    payload = line[len("data:") :].strip()  # (6)
+                    if payload == "[DONE]":  # (7)
+                        return
+                    try:
+                        data = json.loads(payload)  # (8)
+                    except json.JSONDecodeError as e:
+                        raise LLMUnavailableError(f"{self.model}: malformed stream line") from e
+                    if "error" in data:  # (9)
+                        raise LLMUnavailableError(f"{self.model}: error mid-stream")
+                    choices = data.get("choices") or [{}]  # (10)
+                    text = (choices[0].get("delta") or {}).get("content")
+                    if text:  # (11)
+                        yield str(text)
+        except httpx.TimeoutException as e:  # (12)
+            raise LLMTimeoutError(f"{self.model} stopped sending within {self.timeout_s}s") from e
+        except httpx.HTTPError as e:
+            raise LLMUnavailableError(f"{self.model} at {self.base_url}: {type(e).__name__}") from e
