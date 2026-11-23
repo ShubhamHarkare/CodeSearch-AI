@@ -157,6 +157,18 @@ class OllamaLLM:
             ) from e
 
 
+def _error_code(response: httpx.Response) -> str:
+    """Groq's short error code, e.g. " (model_not_found)"; never the free-text message.
+
+    The code is a fixed word, so it's safe to log; the message can echo user input or the key.
+    """
+    try:
+        code = response.json().get("error", {}).get("code")
+    except (ValueError, AttributeError):
+        return ""
+    return f" ({code})" if isinstance(code, str) and code.isidentifier() else ""
+
+
 class OpenAICompatLLM:
     """Any server speaking the OpenAI chat-completions API (Groq, OpenRouter, vLLM, ...)."""
 
@@ -214,9 +226,13 @@ class OpenAICompatLLM:
                 message += f", retry after {wait}s"
             raise LLMRateLimitedError(message)
         if response.status_code in (401, 403):
-            raise LLMUnavailableError(f"{self.model}: the API key was rejected")
+            raise LLMUnavailableError(
+                f"{self.model}: the API key was rejected{_error_code(response)}"
+            )
         if not response.is_success:
-            raise LLMUnavailableError(f"{self.model}: HTTP {response.status_code}")
+            raise LLMUnavailableError(
+                f"{self.model}: HTTP {response.status_code}{_error_code(response)}"
+            )
 
     async def generate(self, prompt: str, system: str | None = None) -> str:
         """One complete answer from POST /chat/completions (no streaming)."""
@@ -242,33 +258,35 @@ class OpenAICompatLLM:
 
     async def stream(self, prompt: str, system: str | None = None) -> AsyncGenerator[str]:
         """Yield the answer as Groq produces it; closing the iterator closes the connection."""
-        body = self._body(prompt, system, stream=True)  # (1)
+        body = self._body(prompt, system, stream=True)
         try:
-            async with self._http().stream(  # (2)
+            async with self._http().stream(
                 "POST",
                 f"{self.base_url}/chat/completions",
                 json=body,
                 headers={"Authorization": f"Bearer {self._key}"},
                 timeout=self.timeout_s,
             ) as response:
-                self._check(response)  # (3)
-                async for line in response.aiter_lines():  # (4)
-                    if not line.startswith("data:"):  # (5)
+                if not response.is_success:
+                    await response.aread()  # a streamed body must be read before .json()
+                self._check(response)
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
                         continue
-                    payload = line[len("data:") :].strip()  # (6)
-                    if payload == "[DONE]":  # (7)
+                    payload = line[len("data:") :].strip()
+                    if payload == "[DONE]":
                         return
                     try:
-                        data = json.loads(payload)  # (8)
+                        data = json.loads(payload)
                     except json.JSONDecodeError as e:
                         raise LLMUnavailableError(f"{self.model}: malformed stream line") from e
-                    if "error" in data:  # (9)
+                    if "error" in data:
                         raise LLMUnavailableError(f"{self.model}: error mid-stream")
-                    choices = data.get("choices") or [{}]  # (10)
+                    choices = data.get("choices") or [{}]
                     text = (choices[0].get("delta") or {}).get("content")
-                    if text:  # (11)
+                    if text:
                         yield str(text)
-        except httpx.TimeoutException as e:  # (12)
+        except httpx.TimeoutException as e:
             raise LLMTimeoutError(f"{self.model} stopped sending within {self.timeout_s}s") from e
         except httpx.HTTPError as e:
             raise LLMUnavailableError(f"{self.model} at {self.base_url}: {type(e).__name__}") from e

@@ -44,6 +44,8 @@ async def stream_response(
                 yield format_event(event)
 
     except CodeSearchError as e:
+        # The user only sees the public message; the real reason goes to the log.
+        log.warning("stream.error", trace_id=trace_id, error=type(e).__name__, detail=str(e))
         yield format_event(
             StreamEvent(type="error", data={"error": e.public_message, "trace_id": trace_id})
         )

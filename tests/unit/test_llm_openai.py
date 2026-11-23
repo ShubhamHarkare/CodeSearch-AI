@@ -426,3 +426,41 @@ def test_the_factory_passes_reasoning_effort() -> None:
 def test_reasoning_effort_must_be_a_known_level() -> None:
     with pytest.raises(ValidationError):
         settings(reasoning_effort="maximum")
+
+
+# =====================================================================
+# Error messages name Groq's error code (a fixed word), never its free text
+# =====================================================================
+
+
+async def test_the_error_names_groqs_error_code() -> None:
+    reply = {"error": {"message": "The model `x` does not exist", "code": "model_not_found"}}
+    with pytest.raises(LLMUnavailableError, match=r"HTTP 404 \(model_not_found\)"):
+        await Server(reply=reply, status=404).llm().generate("Q?")
+
+
+async def test_a_streamed_error_also_names_the_code() -> None:
+    body = SSEStream([json.dumps({"error": {"message": "nope", "code": "invalid_api_key"}})])
+    with pytest.raises(LLMUnavailableError, match="invalid_api_key"):
+        await collect(Server(status=401, stream=body).llm())
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"message": "hi", "code": f"bad {KEY}"},  # not a single word: dropped
+        {"message": f"echo {KEY}", "code": None},
+        "just a string",
+    ],
+)
+async def test_only_a_word_like_code_is_kept(error: Any) -> None:
+    with pytest.raises(LLMUnavailableError) as info:
+        await Server(reply={"error": error}, status=400).llm().generate("Q?")
+    assert str(info.value).endswith("HTTP 400")
+    assert KEY not in str(info.value)
+
+
+async def test_a_non_json_error_body_still_gives_the_status() -> None:
+    server = Server(stream=SSEStream(["<html>Bad Gateway</html>"]), status=502)
+    with pytest.raises(LLMUnavailableError, match=r"HTTP 502$"):
+        await server.llm().generate("Q?")
