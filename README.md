@@ -25,6 +25,11 @@ and it declines without calling the model.
 - **Caches in two tiers.** Exact matches in Redis (falls back to memory when Redis is down)
   plus a semantic tier for paraphrases that must also retrieve the same top chunk. Keys
   include the index, prompt and model versions, so a rebuild never serves stale answers.
+- **Streams answers.** `POST /v1/ask/stream` sends the sources first, then the answer
+  token by token (server-sent events); first words arrive in ~1.8 s instead of ~4.2 s for
+  the whole answer. Closing the tab stops the model mid-answer and caches nothing.
+- **Shares identical in-flight questions.** Ten users asking the same new question at
+  once trigger one LLM call; the other nine wait for it (single-flight per cache key).
 - **Explains every answer** (next section).
 - **Gates merges on quality.** CI re-runs retrieval on the golden set and blocks a PR to
   `main` if a metric drops past its tolerance.
@@ -153,6 +158,25 @@ On the 48 answered questions, low-confidence answers were never good and high-co
 answers were good 79% of the time. ECE is 0.13; with ~50 answers a single answer moves a
 bin by up to 50%, so read the bins together with their `n`.
 
+### Serving performance
+
+Measured on a MacBook Air (gemma3:4b in Ollama, Redis in Docker) with
+`eval/loadtest.py`; every figure is re-runnable with `make loadtest`, and the raw reports
+are in [`docs/loadtest/`](docs/loadtest/).
+
+| Scenario | Result | Report |
+|---|---|---|
+| Cache hits, 50 concurrent | 291 req/s, p50 94 ms, p99 960 ms | `hit.json` |
+| Cache hits while 4 answers generate | p50 9 ms, p99 26 ms | `mixed.json` |
+| New questions, 1 user, streamed | first words p50 1.8 s, full answer p50 4.2 s | `stream.json` |
+| New questions, 4 users, streamed | first words p50 10.2 s, full answer p50 13.5 s | `stream-c4.json` |
+| 10 identical new questions at once | 1 LLM call (was 10), 6.9 s wall time (was 32 s) | `burst.json` |
+
+The model is the bottleneck: a laptop's Ollama generates one answer at a time, so
+concurrent new questions queue (throughput stays ~0.2–0.3 answers/s). Streaming improves
+what one user waits for; more users need more model capacity, not more code. Cache hits
+never queue behind it: they stay at ~9 ms while answers are being generated.
+
 ## Quick start
 
 Needs Python 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com) and,
@@ -169,7 +193,13 @@ make serve                    # API on http://localhost:8000 (OpenAPI docs at /d
 make ui                       # chat UI on http://localhost:8501
 ```
 
-Or from the terminal: `uv run codesearch ask "When should I use useEffect?"`
+Or from the terminal: `uv run codesearch ask "When should I use useEffect?"`, or watch an
+answer stream:
+
+```bash
+curl -N -X POST localhost:8000/v1/ask/stream -H 'Content-Type: application/json' \
+     -d '{"question": "When should I use useEffect?"}'
+```
 
 ## Evaluation
 
@@ -181,6 +211,9 @@ make ablation                 # every config in eval/configs/, then refreshes th
 uv run python -m eval.answer_eval eval/configs/dense.yaml [--limit 10]
 uv run python -m eval.fit_calibrator results/answers_dense.json   # -> models/calibrator.json
 uv run python -m eval.plot_reliability                           # -> docs/reliability.png
+
+# serving performance (needs `make serve` running)
+make loadtest                 # hit, miss, burst, mixed, stream -> docs/loadtest/*.json
 ```
 
 - `eval/golden.jsonl`: the 79 questions, each with the doc sections that answer it, or
@@ -221,25 +254,32 @@ make lint                     # ruff + ruff format + mypy --strict
   CI, not to claim general accuracy.
 - **A 4B local model.** Chosen for cost and privacy; answers are slower (~6 s) and weaker
   than a hosted model would give. The model is one config value.
-- **Synchronous work on the event loop.** Embedding, Chroma, reranking and Redis calls are
-  blocking inside an async handler, and identical concurrent questions each call the LLM.
+- **One answer at a time.** The local model serializes generation, so with 4 concurrent
+  new questions the first words take ~10 s. Streaming doesn't change that; capacity does.
+- **Some synchronous work on the event loop.** Embedding, Chroma, reranking and the NLI
+  check are blocking calls; measured, they stall other requests by up to ~0.6 s per
+  answer (cache hits stay at p50 9 ms during generation), and the Redis client is
+  synchronous, which queues cache hits at high concurrency (p99 960 ms at 50).
+- **Single-flight is per process**, like the semantic cache: with several workers, each
+  shares only its own in-flight questions. Streamed requests don't share at all.
 - **The semantic cache is per process**: in memory, lost on restart, not shared between
   workers, and its 0.95 threshold has not been evaluated for false hits.
-- **No streaming yet**: answers arrive whole.
 
 ## Status and roadmap
 
-Phases 1 (retrieval, eval, API, UI) and 2 (explainability) are complete. These are
-scaffolding for Phase 3 and are **not implemented yet**: `codesearch/monitoring/`,
-`codesearch/api/sse.py`, `codesearch/api/background.py`, `deploy/`, `make up`, and the
-`nightly-eval` and `release` workflows.
+Phases 1 (retrieval, eval, API, UI) and 2 (explainability) are complete. Phase 3 is in
+progress: streaming (API and UI), single-flight and the load test are done. These are
+scaffolding and **not implemented yet**: `codesearch/monitoring/`,
+`codesearch/api/background.py`, `deploy/`, `make up`, and the `nightly-eval` and
+`release` workflows.
 
 Next:
 
-- **Evaluation:** a fair v1 baseline, bootstrap confidence intervals, a held-out split for
-  the abstain threshold with one threshold per score kind, and a larger golden set.
-- **Serving:** move blocking calls off the event loop, single-flight per cache key, the
-  semantic cache in Redis, SSE streaming, and a committed load-test script.
+- **Evaluation:** bootstrap confidence intervals, a held-out split for the abstain
+  threshold with one threshold per score kind, and a larger golden set.
+- **Serving:** load models at startup (the first request after a restart pays ~7 s), an
+  async Redis client, blocking calls in threads, and the semantic cache in Redis.
+- **Freshness:** incremental re-indexing when the docs change, triggered by a webhook.
 - **Deployment:** a multi-stage Docker image, a compose stack, Prometheus metrics and
   drift monitoring.
 

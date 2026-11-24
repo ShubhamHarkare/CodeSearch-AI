@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 
-from codesearch.ui.api_client import ApiClient, ApiError
+from codesearch.ui.api_client import ApiClient, ApiError, parse_sse
 
 BASE = "http://api.test"
 ANSWER = {
@@ -270,3 +270,165 @@ def test_api_client_only_imports_schemas_from_codesearch() -> None:
     }
     ours = {name for name in imported if name.split(".")[0] == "codesearch"}
     assert ours <= {"codesearch.schemas"}
+
+
+# =====================================================================
+# ask_stream (server-sent events)
+# =====================================================================
+
+DONE = {**{k: v for k, v in ANSWER.items() if k != "answer"}, "text": ANSWER["answer"]}
+
+
+def sse(*frames: tuple[str, Any]) -> bytes:
+    return "".join(f"event: {kind}\ndata: {json.dumps(data)}\n\n" for kind, data in frames).encode()
+
+
+def stream_reply(body: bytes, status: int = 200) -> httpx.Response:
+    return httpx.Response(
+        status, content=body, headers={"content-type": "text/event-stream", "x-trace-id": "t-1"}
+    )
+
+
+FRAMES = (
+    ("retrieval", [{"number": 1, "chunk_id": "c1", "url": "https://react.dev/x", "title": "X"}]),
+    ("token", "Use an "),
+    ("token", "updater function [1]."),
+    ("done", DONE),
+)
+
+
+def test_ask_stream_posts_to_the_stream_endpoint() -> None:
+    api = Recorder(stream_reply(sse(*FRAMES)))
+    list(make(api).ask_stream("Q?", history=[{"role": "user", "content": "hi"}], bypass_cache=True))
+    assert api.requests[0].url == f"{BASE}/v1/ask/stream"
+    assert api.last_json == {
+        "question": "Q?",
+        "history": [{"role": "user", "content": "hi"}],
+        "bypass_cache": True,
+    }
+
+
+def test_ask_stream_yields_each_event_in_order() -> None:
+    events = list(make(Recorder(stream_reply(sse(*FRAMES)))).ask_stream("Q?"))
+    assert [e.type for e in events] == ["retrieval", "token", "token", "done"]
+    assert "".join(e.data for e in events if e.type == "token") == ANSWER["answer"]
+    assert events[-1].data["trace_id"] == "t-1"
+
+
+def test_ask_stream_stops_at_done() -> None:
+    body = sse(*FRAMES, ("token", "after done"))
+    events = list(make(Recorder(stream_reply(body))).ask_stream("Q?"))
+    assert events[-1].type == "done"
+
+
+def test_an_error_event_raises_after_the_events_before_it() -> None:
+    body = sse(
+        FRAMES[0],
+        FRAMES[1],
+        ("error", {"error": "The language model is unavailable.", "trace_id": "t-9"}),
+    )
+    seen = []
+    with pytest.raises(ApiError) as caught:
+        for event in make(Recorder(stream_reply(body))).ask_stream("Q?"):
+            seen.append(event.type)
+    assert seen == ["retrieval", "token"]
+    assert str(caught.value) == "The language model is unavailable."
+    assert caught.value.trace_id == "t-9"
+
+
+def test_a_stream_that_ends_without_done_raises() -> None:
+    body = sse(FRAMES[0], FRAMES[1])  # the server died mid-answer
+    with pytest.raises(ApiError, match="ended before"):
+        list(make(Recorder(stream_reply(body))).ask_stream("Q?"))
+
+
+def test_a_validation_error_raises_before_any_event() -> None:
+    reply = httpx.Response(
+        422, json={"detail": [{"msg": "String should have at least 1 character"}]}
+    )
+    with pytest.raises(ApiError, match="Invalid request") as caught:
+        list(make(Recorder(reply)).ask_stream(""))
+    assert caught.value.status == 422
+
+
+def test_an_http_error_uses_the_apis_message() -> None:
+    reply = httpx.Response(
+        503, json={"error": "The search index is still loading.", "trace_id": "t-3"}
+    )
+    with pytest.raises(ApiError, match="still loading") as caught:
+        list(make(Recorder(reply)).ask_stream("Q?"))
+    assert (caught.value.status, caught.value.trace_id) == (503, "t-3")
+
+
+def test_ask_stream_when_the_api_is_down() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    with pytest.raises(ApiError, match="make serve"):
+        list(make(refuse).ask_stream("Q?"))
+
+
+def test_ask_stream_timeout() -> None:
+    def slow(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(ApiError, match="stopped responding"):
+        list(make(slow, timeout_s=5).ask_stream("Q?"))
+
+
+def test_ask_stream_garbage_raises_api_error_not_a_crash() -> None:
+    body = b"event: token\ndata: {not json\n\n"
+    with pytest.raises(ApiError, match="can't read"):
+        list(make(Recorder(stream_reply(body))).ask_stream("Q?"))
+
+
+# =====================================================================
+# parse_sse
+# =====================================================================
+
+
+def test_parse_sse_handles_newlines_inside_json_and_comments() -> None:
+    lines = [
+        ": ping",
+        "event: token",
+        'data: "```js\\nconst x = 1;\\n```"',
+        "",
+        "event: done",
+        'data: {"text": "ok"}',
+        "",
+    ]
+    events = list(parse_sse(iter(lines)))
+    assert [(e.type, e.data) for e in events] == [
+        ("token", "```js\nconst x = 1;\n```"),
+        ("done", {"text": "ok"}),
+    ]
+
+
+def test_parse_sse_accepts_a_last_event_without_a_blank_line() -> None:
+    events = list(parse_sse(iter(["event: token", 'data: "x"'])))
+    assert [(e.type, e.data) for e in events] == [("token", "x")]
+
+
+# =====================================================================
+# send_feedback
+# =====================================================================
+
+
+def test_feedback_posts_the_vote_and_comment() -> None:
+    api = Recorder(httpx.Response(204))
+    assert make(api).send_feedback("t-1", -1, "wrong hook") is None
+    assert api.requests[0].method == "POST"
+    assert api.requests[0].url == f"{BASE}/v1/feedback"
+    assert api.last_json == {"trace_id": "t-1", "vote": -1, "comment": "wrong hook"}
+
+
+def test_feedback_without_a_comment_leaves_it_out() -> None:
+    api = Recorder(httpx.Response(204))
+    make(api).send_feedback("t-1", 1)
+    assert api.last_json == {"trace_id": "t-1", "vote": 1}
+
+
+def test_feedback_on_an_unknown_answer_raises() -> None:
+    api = Recorder(httpx.Response(404, json={"error": "No such trace.", "trace_id": "r-9"}))
+    with pytest.raises(ApiError, match="No such trace"):
+        make(api).send_feedback("gone", 1)

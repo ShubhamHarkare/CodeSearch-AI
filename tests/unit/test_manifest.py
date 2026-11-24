@@ -9,12 +9,16 @@ import pytest
 from pydantic import ValidationError
 
 from codesearch.ingest.manifest import (
+    BUILDS_DIR,
+    CURRENT_FILE,
     PIPELINE_VERSION,
     ChangeLogEntry,
     ChunkParams,
     Manifest,
     compute_index_version,
+    live_dir,
     read_manifest,
+    set_live,
     write_manifest,
 )
 
@@ -167,3 +171,34 @@ def test_changelog_defaults_to_empty_and_is_not_shared() -> None:
         ChangeLogEntry(at=datetime.now(UTC), corpus_sha=SHA, added=1, removed=0, unchanged=0)
     )
     assert second.changelog == []
+
+
+# =====================================================================
+# Build folders: live_dir / set_live
+# =====================================================================
+
+
+def test_live_dir_is_index_dir_itself_without_a_pointer(tmp_path: Path) -> None:
+    """Indexes built before build folders existed keep working."""
+    assert live_dir(tmp_path) == tmp_path
+
+
+def test_set_live_points_current_at_a_build(tmp_path: Path) -> None:
+    (tmp_path / BUILDS_DIR / "b1").mkdir(parents=True)
+    set_live(tmp_path, "b1")
+    assert (tmp_path / CURRENT_FILE).read_text(encoding="utf-8") == "b1"
+    assert live_dir(tmp_path) == tmp_path / BUILDS_DIR / "b1"
+    assert not (tmp_path / f"{CURRENT_FILE}.tmp").exists()  # written atomically
+
+
+def test_set_live_refuses_a_build_that_does_not_exist(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        set_live(tmp_path, "missing")
+    assert not (tmp_path / CURRENT_FILE).exists()
+
+
+def test_read_manifest_follows_current(tmp_path: Path) -> None:
+    build = tmp_path / BUILDS_DIR / "b1"
+    write_manifest(build, make_manifest())
+    set_live(tmp_path, "b1")
+    assert read_manifest(tmp_path) == read_manifest(build)

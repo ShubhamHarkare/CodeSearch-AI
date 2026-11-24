@@ -1,0 +1,53 @@
+{
+  "mode": "mixed",
+  "concurrency": 4,
+  "url": "http://localhost:8000",
+  "summary": {
+    "requests": 8,
+    "ok": 8,
+    "errors": 0,
+    "status_counts": {
+      "200": 8
+    },
+    "wall_s": 26.327,
+    "throughput_rps": 0.3,
+    "latency_ms": {
+      "p50": 12153.5,
+      "p90": 13419.3,
+      "p99": 13419.3,
+      "max": 13419.3,
+      "mean": 10718.0
+    },
+    "cache_tiers": {
+      "generated": 8
+    }
+  },
+  "hit_during_miss": {
+    "requests": 11692,
+    "ok": 11692,
+    "errors": 0,
+    "status_counts": {
+      "200": 11692
+    },
+    "wall_s": 26.327,
+    "throughput_rps": 444.11,
+    "latency_ms": {
+      "p50": 9.3,
+      "p90": 12.5,
+      "p99": 26.4,
+      "max": 627.5,
+      "mean": 11.1
+    },
+    "cache_tiers": {
+      "exact": 11692
+    }
+  },
+  "versions": {
+    "prompt_version": "3",
+    "index_version": "ac462615f149"
+  },
+  "git_sha": "3c00142",
+  "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "python": "3.13.5",
+  "at": "2026-11-20T18:19:20+00:00"
+}

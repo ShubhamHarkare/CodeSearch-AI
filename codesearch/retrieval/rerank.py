@@ -80,3 +80,7 @@ class CrossEncoderReranker:
         order = sorted(range(len(chunks)), key=lambda i: scores[i], reverse=True)
         # model_copy keeps the bm25/dense/rrf scores (the explanation trace needs them).
         return [chunks[i].model_copy(update={"rerank_score": scores[i]}) for i in order[:top_n]]
+
+    def warm_up(self) -> None:  # ← NEW
+        """Load the cross-encoder and score one pair, before the first request."""
+        self._score([("warm up", "warm up")])

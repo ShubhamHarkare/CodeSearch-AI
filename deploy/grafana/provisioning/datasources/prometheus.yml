@@ -1,0 +1,10 @@
+# Loaded by Grafana at startup: no clicking through the UI to add Prometheus.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus  # the dashboard JSON refers to this uid
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

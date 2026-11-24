@@ -15,15 +15,26 @@ Tested by: tests/integration/test_api.py.
 Phase: 3-4
 """
 
-from typing import Literal
+import asyncio
+from dataclasses import asdict
+from typing import Any, Literal
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, Depends, Query, Response
 
-from codesearch.api.deps import HandleDep, PipelineDep, SettingsDep
+from codesearch.api.deps import (
+    HandleDep,
+    MonitorDep,
+    PipelineDep,
+    ReindexerDep,
+    SettingsDep,
+    verify_webhook,
+)
 from codesearch.api.models import HealthStatus, IndexInfo
 from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.tiered import TieredCache
 from codesearch.errors import CacheUnavailableError
+from codesearch.monitoring.gaps import content_gaps
+from codesearch.monitoring.prometheus import CONTENT_TYPE
 
 router = APIRouter(tags=["admin"])
 CHANGELOG_TAIL = 5
@@ -91,3 +102,42 @@ async def index_info(handle: HandleDep, pipeline: PipelineDep, settings: Setting
         prompt_version=pipeline.answer_prompt.version,
         image_sha=settings.image_sha,
     )
+
+
+@router.post("/v1/admin/reindex", status_code=202, dependencies=[Depends(verify_webhook)])
+async def reindex(runner: ReindexerDep) -> dict[str, str]:
+    """Start a rebuild, or queue one if a rebuild is running. Returns before it finishes.
+
+    202 Accepted: the work has started, not finished; GET this path to follow it.
+    verify_webhook runs first: a bad signature is a 401 and starts nothing.
+    """
+    return {"status": await runner.trigger("webhook")}
+
+
+@router.get("/v1/admin/reindex")
+async def reindex_status(runner: ReindexerDep) -> dict[str, Any]:
+    """Is a rebuild running, and how did the last one go? Read-only, so not signed."""
+    return runner.status()
+
+
+@router.get("/metrics")
+async def metrics(monitor: MonitorDep, handle: HandleDep, runner: ReindexerDep) -> Response:
+    manifest = handle.snapshot().manifest if handle.ready else None
+    monitor.refresh(manifest, runner.status())
+    return Response(monitor.metrics.render(), media_type=CONTENT_TYPE)
+
+
+@router.get("/v1/admin/gaps", dependencies=[Depends(verify_webhook)])
+async def gaps(
+    monitor: MonitorDep, pipeline: PipelineDep, k: int = Query(5, ge=1, le=10)
+) -> list[dict[str, Any]]:
+    """Topics users asked about that the app couldn't answer, biggest first.
+
+    Signed like the reindex webhook: the clusters contain raw user questions.
+    """
+    if pipeline.embedder is None:  # lexical-only mode: nothing to cluster with
+        return []
+    questions = [s.query for s in monitor.window.snapshot() if s.abstained]
+    # embedding + k-means are CPU-bound: run them off the event loop so /ask keeps serving
+    clusters = await asyncio.to_thread(content_gaps, questions, pipeline.embedder, k=k)
+    return [asdict(c) for c in clusters]

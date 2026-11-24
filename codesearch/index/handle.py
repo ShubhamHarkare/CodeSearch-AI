@@ -25,7 +25,7 @@ from pathlib import Path
 from codesearch.errors import IndexNotReadyError
 from codesearch.index.bm25 import BM25Index
 from codesearch.index.vector_store import VectorStore
-from codesearch.ingest.manifest import Manifest, read_manifest
+from codesearch.ingest.manifest import Manifest, live_dir, read_manifest
 from codesearch.log import get_logger
 
 log = get_logger(__name__)
@@ -45,7 +45,7 @@ class IndexSnapshot:
     @classmethod
     def open(cls, index_dir: Path) -> "IndexSnapshot | None":
         """Open a built index from disk; None if nothing has been built there yet."""
-        index_dir = Path(index_dir)
+        index_dir = live_dir(Path(index_dir))  # the live build's folder
         manifest = read_manifest(index_dir)
         if manifest is None:
             return None

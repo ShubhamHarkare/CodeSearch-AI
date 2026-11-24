@@ -12,7 +12,9 @@ class IndexSettings(BaseModel):
     """
 
     react_dev_repo: str = "https://github.com/reactjs/react.dev.git"
-    react_dev_sha: str = "046f17d04295ba047bb5739026b4ac3110f17028"
+    # A pinned commit keeps builds and evals reproducible; None means "latest main"
+    # (what background re-indexing uses when admin.follow_upstream is on).
+    react_dev_sha: str | None = "046f17d04295ba047bb5739026b4ac3110f17028"
     corpus_dir: Path = Path("data/")
     index_dir: Path = Path("index/")
     embedding_model: str = "BAAI/bge-small-en-v1.5"
@@ -39,12 +41,15 @@ class RetrievalSettings(BaseModel):
 class LLMSettings(BaseModel):
     """LLM provider and inference configurations."""
 
-    provider: Literal["ollama", "fake"] = "fake"
+    provider: Literal["ollama", "openai", "fake"] = "fake"  # openai = any OpenAI-compatible API
     model: str = "gemma3:4b"
     temperature: float = 0.0
     max_tokens: int = 1024
     timeout_s: float = 120.0  # local models on a laptop CPU/GPU can take a while
     ollama_base_url: str = "http://localhost:11434"
+    openai_base_url: str = "https://api.groq.com/openai/v1"
+    api_key: SecretStr = SecretStr("")  # from CODESEARCH_LLM__API_KEY, never in the repo
+    reasoning_effort: Literal["low", "medium", "high"] | None = None  # gpt-oss: keep thinking short
 
 
 class CacheSettings(BaseModel):
@@ -63,13 +68,16 @@ class MonitoringSettings(BaseModel):
 
     window_size: int = 500
     drift_threshold: float = 0.2
+    reference_questions: Path = Path("eval/golden.jsonl")
+    drift_min_questions: int = 20
 
 
 class AdminSettings(BaseModel):
-    """Administrative secrets and background task scheduling."""
+    """Re-indexing: the webhook secret and the background schedule."""
 
-    webhook_secret: SecretStr = SecretStr("")
-    reindex_interval_hours: int = 6
+    webhook_secret: SecretStr = SecretStr("")  # empty: the reindex webhook is disabled
+    follow_upstream: bool = False  # background re-indexing fetches the latest main
+    reindex_interval_hours: float = 6.0  # with follow_upstream; 0 turns the timer off
 
 
 class ExplainSettings(BaseModel):

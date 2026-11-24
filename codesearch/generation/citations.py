@@ -97,3 +97,19 @@ def to_citations(answer: str, chunks: list[ScoredChunk]) -> list[Citation]:
                 )
             )
     return citations
+
+
+def sources(chunks: list[ScoredChunk]) -> list[Citation]:
+    """Every chunk sent to the LLM, numbered as the prompt numbers them ([1] = chunks[0])."""
+    citations: list[Citation] = []
+    for number, scored in enumerate(chunks, start=1):
+        chunk = scored.chunk  # a ScoredChunk wraps the Chunk and its scores
+        citations.append(
+            Citation(
+                number=number,
+                chunk_id=chunk.id,
+                url=url_with_anchor(chunk.url, chunk.anchor),
+                title=chunk.title,
+            )
+        )
+    return citations

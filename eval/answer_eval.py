@@ -1,17 +1,23 @@
 """End-to-end answer quality over the golden set (answer mode).
 
     uv run python -m eval.answer_eval eval/configs/dense.yaml --limit 10
+    uv run python -m eval.answer_eval eval/configs/dense.yaml --tag gpt-oss-20b --pause 5
 
 Asks every golden question through the full pipeline (retrieval, LLM, NLI groundedness),
 then reports answer rate, groundedness, citation precision, out-of-scope refusals and
 latency. Writes results/answers_<name>.json and results/sentences_<name>.csv (one row
 per graded sentence, with a blank "human" column to label by hand for threshold tuning).
+
+A hosted LLM on a free tier refuses calls past its per-minute quota (HTTP 429): each
+question is retried with growing waits instead of crashing the run. ``--pause`` spaces
+the questions out so the quota is rarely hit; ``--tag`` keeps runs with different models
+side by side (answers_dense_gpt-oss-20b.json next to answers_dense.json).
 """
 
 import asyncio
 import csv
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from math import ceil
 from pathlib import Path
 from typing import Annotated, Any
@@ -19,7 +25,7 @@ from typing import Annotated, Any
 import typer
 
 from codesearch.config import Settings
-from codesearch.errors import TraceNotFoundError
+from codesearch.errors import LLMRateLimitedError, TraceNotFoundError
 from codesearch.explain.calibration import features
 from codesearch.factory import build_pipeline
 from codesearch.schemas import Answer, ExplanationTrace
@@ -157,17 +163,59 @@ def sentence_rows(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+Sleep = Callable[[float], Awaitable[None]]
+RETRIES = 6
+FIRST_WAIT_S = 5.0
+MAX_WAIT_S = 60.0
+
+
+def backoff(attempt: int) -> float:
+    """Seconds to wait before retry number ``attempt`` (0-based): 5, 10, 20, 40, 60, 60."""
+    return float(min(MAX_WAIT_S, FIRST_WAIT_S * 2**attempt))
+
+
+async def ask_with_retry(
+    pipeline: Any,
+    question: str,
+    *,
+    retries: int = RETRIES,
+    sleep: Sleep = asyncio.sleep,
+    on_wait: Callable[[float], None] | None = None,
+) -> Answer:
+    """pipeline.answer, retried while the LLM is rate limited. Other errors are not retried."""
+    for attempt in range(retries + 1):
+        try:
+            answer: Answer = await pipeline.answer(question, bypass_cache=True)
+            return answer
+        except LLMRateLimitedError:
+            if attempt == retries:
+                raise  # still limited after ~4 minutes: likely the daily quota, stop
+            wait = backoff(attempt)
+            if on_wait is not None:
+                on_wait(wait)
+            await sleep(wait)
+    raise AssertionError("unreachable")  # the loop always returns or raises
+
+
 async def run_answers(
     pipeline: Any,
     rows: Sequence[GoldenRow],
     *,
     limit: int | None = None,
     on_progress: Callable[[int, int], None] | None = None,
+    pause: float = 0.0,
+    retries: int = RETRIES,
+    sleep: Sleep = asyncio.sleep,
+    on_wait: Callable[[float], None] | None = None,
 ) -> list[dict[str, Any]]:
     todo = list(rows)[:limit] if limit is not None else list(rows)
     records: list[dict[str, Any]] = []
     for i, row in enumerate(todo, start=1):
-        answer = await pipeline.answer(row.question, bypass_cache=True)
+        if pause > 0 and i > 1:
+            await sleep(pause)  # stay under a per-minute quota
+        answer = await ask_with_retry(
+            pipeline, row.question, retries=retries, sleep=sleep, on_wait=on_wait
+        )
         try:
             trace = pipeline.trace_store.get(answer.trace_id)  # sync: no await
         except TraceNotFoundError:
@@ -187,6 +235,7 @@ def run(
     golden_path: Path = GOLDEN_PATH,
     results_dir: Path = Path("results"),
     limit: int | None = None,
+    tag: str = "",
 ) -> dict[str, Any]:
     cfg = load_config(config_path)
     if pipeline is None:
@@ -197,7 +246,13 @@ def run(
         pipeline = build_pipeline(settings)
 
     records = asyncio.run(run_answers(pipeline, load_golden(golden_path), limit=limit))
-    return _write(cfg.name, records, results_dir)
+    return _write(result_name(cfg.name, tag), records, results_dir)
+
+
+def result_name(config: str, tag: str = "") -> str:
+    """dense + "gpt-oss-20b" -> "dense_gpt-oss-20b"; "/" in a model id is not a path."""
+    clean = tag.strip().replace("/", "-").replace(" ", "-")
+    return f"{config}_{clean}" if clean else config
 
 
 def _write(name: str, records: list[dict[str, Any]], results_dir: Path) -> dict[str, Any]:
@@ -231,11 +286,20 @@ def main(
         Path, typer.Argument(exists=True, dir_okay=False, help="eval/configs/*.yaml")
     ],
     limit: Annotated[int | None, typer.Option(help="Only the first N golden questions.")] = None,
+    tag: Annotated[
+        str, typer.Option(help="Suffix for the result files, e.g. the model: gpt-oss-20b.")
+    ] = "",
+    pause: Annotated[
+        float, typer.Option(help="Seconds between questions (free-tier quotas).")
+    ] = 0.0,
 ) -> None:
     """Answer the golden questions end to end and report answer quality."""
 
     def progress(done: int, total: int) -> None:
         typer.echo(f"\r  {done}/{total}", nl=False)
+
+    def waiting(seconds: float) -> None:
+        typer.echo(f"  (rate limited: waiting {seconds:.0f}s)", nl=False)
 
     cfg = load_config(config)
     settings = Settings().with_overrides(**cfg.overrides)
@@ -244,13 +308,17 @@ def main(
     )
     pipeline = build_pipeline(settings)
     rows = load_golden(GOLDEN_PATH)
-    records = asyncio.run(run_answers(pipeline, rows, limit=limit, on_progress=progress))
+    typer.echo(f"model: {settings.llm.provider} / {settings.llm.model}")
+    records = asyncio.run(
+        run_answers(pipeline, rows, limit=limit, on_progress=progress, pause=pause, on_wait=waiting)
+    )
     typer.echo("")
-    result = _write(cfg.name, records, Path("results"))
+    name = result_name(cfg.name, tag)
+    result = _write(name, records, Path("results"))
     typer.echo(f"{result['config']}: {len(records)} questions")
     for key, value in result["metrics"].items():
         typer.echo(f"  {key:<20} {value:.3f}")
-    typer.echo(f"results -> results/answers_{cfg.name}.json, results/sentences_{cfg.name}.csv")
+    typer.echo(f"results -> results/answers_{name}.json, results/sentences_{name}.csv")
 
 
 if __name__ == "__main__":

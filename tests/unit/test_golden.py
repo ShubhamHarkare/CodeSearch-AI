@@ -310,12 +310,12 @@ def test_real_golden_rows_have_at_most_three_urls(golden: list[GoldenRow]) -> No
 
 def test_real_golden_urls_exist_in_the_local_index(golden: list[GoldenRow]) -> None:
     """Every expected URL must be a real chunk url#anchor. Needs a built index, so CI skips it."""
-    if not (INDEX_DIR / "manifest.json").exists():
-        pytest.skip("no local index; run `codesearch ingest` first")
-    from codesearch.index.handle import CHROMA_DIR
-    from codesearch.index.vector_store import VectorStore
+    from codesearch.index.handle import IndexSnapshot
     from codesearch.ingest.urls import url_with_anchor
 
-    store = VectorStore(INDEX_DIR / CHROMA_DIR)
+    snapshot = IndexSnapshot.open(INDEX_DIR)  # follows index/CURRENT to the live build
+    if snapshot is None:
+        pytest.skip("no local index; run `codesearch ingest` first")
+    store = snapshot.vector_store
     known = {url_with_anchor(c.url, c.anchor) for c in store.get(sorted(store.all_ids()))}
     assert missing_urls(golden, known) == {}

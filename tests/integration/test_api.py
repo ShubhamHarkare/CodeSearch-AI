@@ -10,6 +10,11 @@ reindex webhook are added in later phases.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
+import math
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -19,6 +24,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from codesearch.api.background import ReindexRunner
 from codesearch.api.main import create_app
 from codesearch.cache.exact import RedisExactCache
 from codesearch.cache.memory import LRUCache
@@ -27,6 +33,7 @@ from codesearch.config import Settings
 from codesearch.errors import (
     ExplainUnavailableError,
     IndexNotReadyError,
+    InvalidWebhookError,
     LLMUnavailableError,
     TraceNotFoundError,
 )
@@ -35,7 +42,8 @@ from codesearch.generation.llm import FakeLLM
 from codesearch.generation.prompts import load_prompt
 from codesearch.index.embedder import HashEmbedder
 from codesearch.index.handle import IndexHandle, IndexSnapshot
-from codesearch.ingest.build import build_index
+from codesearch.ingest.build import IngestReport, build_index
+from codesearch.monitoring.feedback import FeedbackStore
 from codesearch.pipeline import AnswerPipeline
 from codesearch.retrieval.abstain import ABSTAIN_MESSAGE
 from codesearch.retrieval.hybrid import HybridRetriever
@@ -505,3 +513,377 @@ async def test_deep_explain_of_an_abstained_answer_is_409(client: Client) -> Non
         r = await c.post(f"/v1/explain/{answer['trace_id']}/deep")
     assert r.status_code == 409
     assert r.json()["error"] == ExplainUnavailableError.public_message
+
+
+# =====================================================================
+# POST /v1/ask/stream (server-sent events)
+# =====================================================================
+
+
+def sse_frames(body: str) -> list[tuple[str, Any]]:
+    """Parse an SSE body into (event, data) pairs."""
+    out: list[tuple[str, Any]] = []
+    for block in body.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in block.split("\n"))
+        out.append((lines["event"], json.loads(lines["data"])))
+    return out
+
+
+async def test_stream_sends_retrieval_tokens_then_done(client: Client) -> None:
+    async with client() as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    assert r.headers["cache-control"] == "no-cache"
+    frames = sse_frames(r.text)
+    kinds = [kind for kind, _ in frames]
+    assert kinds[0] == "retrieval" and kinds[-1] == "done"
+    assert set(kinds[1:-1]) == {"token"}
+    assert "".join(data for kind, data in frames if kind == "token") == FakeLLM.DEFAULT_ANSWER
+
+
+async def test_stream_done_carries_the_answer_and_the_requests_trace_id(client: Client) -> None:
+    async with client() as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    done = sse_frames(r.text)[-1][1]
+    assert done["trace_id"] == r.headers["x-trace-id"]
+    assert [c["number"] for c in done["citations"]] == [1, 2]
+    assert "ttft_ms" in done["timings"]
+
+
+async def test_stream_rejects_an_empty_question_before_streaming(client: Client) -> None:
+    async with client() as c:
+        r = await c.post("/v1/ask/stream", json={"question": ""})
+    assert r.status_code == 422  # validation runs before any event is sent
+
+
+async def test_stream_turns_an_llm_outage_into_an_error_event(client: Client) -> None:
+    async with client(llm=DownLLM()) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    assert r.status_code == 200  # the status was sent before the failure
+    kind, data = sse_frames(r.text)[-1]
+    assert kind == "error"
+    assert data == {
+        "error": LLMUnavailableError.public_message,
+        "trace_id": r.headers["x-trace-id"],
+    }
+
+
+async def test_stream_hides_unexpected_errors(client: Client) -> None:
+    async with client(llm=BrokenLLM()) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    kind, data = sse_frames(r.text)[-1]
+    assert kind == "error"
+    assert data["trace_id"] == r.headers["x-trace-id"]
+    assert "secret internal detail" not in r.text
+
+
+async def test_stream_without_an_index_reports_it_as_an_error_event(client: Client) -> None:
+    async with client(handle=IndexHandle()) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+    assert sse_frames(r.text) == [
+        ("error", {"error": IndexNotReadyError.public_message, "trace_id": r.headers["x-trace-id"]})
+    ]
+
+
+# =====================================================================
+# POST / GET /v1/admin/reindex (signed webhook)
+# =====================================================================
+
+SECRET = "s3cret"
+REPORT = IngestReport(
+    corpus_sha="a" * 40,
+    index_version="v2",
+    pages=3,
+    chunks=10,
+    added=1,
+    removed=0,
+    unchanged=9,
+    full_rebuild=False,
+    duration_s=0.1,
+)
+
+
+def signed(body: bytes, secret: str = SECRET) -> dict[str, str]:
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return {"X-Hub-Signature-256": f"sha256={digest}", "Content-Type": "application/json"}
+
+
+class HeldBuild:
+    """A fake build that waits until released, so a second trigger finds it running."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.release = threading.Event()
+
+    def __call__(self) -> IngestReport:
+        self.calls += 1
+        self.release.wait(timeout=5)
+        return REPORT
+
+
+def admin_client(built: Any, secret: str = SECRET) -> tuple[Any, ReindexRunner, HeldBuild]:
+    settings, pipeline = make_pipeline(built)
+    settings = settings.with_overrides(admin={"webhook_secret": secret})
+    build = HeldBuild()
+    runner = ReindexRunner(build)
+    return serve(create_app(settings, pipeline=pipeline, reindexer=runner)), runner, build
+
+
+async def test_a_signed_webhook_starts_a_reindex_and_returns_202(built: Any) -> None:
+    client, runner, build = admin_client(built)
+    body = b'{"ref": "refs/heads/main"}'
+    async with client as c:
+        first = await c.post("/v1/admin/reindex", content=body, headers=signed(body))
+        second = await c.post("/v1/admin/reindex", content=body, headers=signed(body))
+        build.release.set()
+        await runner.wait()
+    assert (first.status_code, first.json()) == (202, {"status": "started"})
+    assert (second.status_code, second.json()) == (202, {"status": "queued"})
+    assert build.calls == 2
+
+
+async def test_a_bad_signature_is_401_and_starts_nothing(built: Any) -> None:
+    client, runner, build = admin_client(built)
+    body = b"{}"
+    async with client as c:
+        r = await c.post("/v1/admin/reindex", content=body, headers=signed(body, secret="guess"))
+    assert r.status_code == 401
+    assert r.json()["error"] == InvalidWebhookError.public_message
+    assert build.calls == 0 and runner.runs == 0
+
+
+async def test_a_missing_signature_is_401(built: Any) -> None:
+    client, _, build = admin_client(built)
+    async with client as c:
+        r = await c.post("/v1/admin/reindex", json={})
+    assert r.status_code == 401
+    assert build.calls == 0
+
+
+async def test_the_webhook_is_refused_when_no_secret_is_configured(built: Any) -> None:
+    client, _, build = admin_client(built, secret="")
+    body = b"{}"
+    async with client as c:
+        r = await c.post("/v1/admin/reindex", content=body, headers=signed(body, secret=""))
+    assert r.status_code == 401
+    assert "not enabled" in r.json()["error"]
+    assert build.calls == 0
+
+
+async def test_reindex_status_reports_the_last_run(built: Any) -> None:
+    client, runner, build = admin_client(built)
+    build.release.set()
+    body = b"{}"
+    async with client as c:
+        idle = (await c.get("/v1/admin/reindex")).json()
+        await c.post("/v1/admin/reindex", content=body, headers=signed(body))
+        await runner.wait()
+        done = (await c.get("/v1/admin/reindex")).json()
+    assert idle["running"] is False and idle["runs"] == 0
+    assert done["runs"] == 1 and done["last_reason"] == "webhook"
+    assert done["last_report"]["index_version"] == "v2"
+
+
+# =====================================================================
+# GET /metrics (Prometheus)
+# =====================================================================
+
+
+def metric(text: str, line_start: str) -> float:
+    """The value of the first exposition line starting with `line_start`."""
+    for line in text.splitlines():
+        if line.startswith(line_start):
+            return float(line.rsplit(" ", 1)[1])
+    raise AssertionError(f"no line starting with {line_start!r}")
+
+
+async def test_metrics_is_prometheus_text(client: Client) -> None:
+    async with client() as c:
+        r = await c.get("/metrics")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "# TYPE codesearch_answers_total counter" in r.text
+    assert "codesearch_index_chunks" in r.text
+
+
+async def test_metrics_count_answers_and_their_latency(client: Client) -> None:
+    async with client() as c:
+        await c.post("/v1/ask", json={"question": QUESTION})
+        await c.post("/v1/ask/stream", json={"question": QUESTION})
+        text = (await c.get("/metrics")).text
+    assert metric(text, 'codesearch_answers_total{abstained="false",cache_tier="generated"}') == 2
+    assert metric(text, "codesearch_ttft_seconds_count") == 1  # only the streamed one has a TTFT
+    assert metric(text, "codesearch_window_answers") == 2
+
+
+async def test_metrics_label_routes_by_template_not_by_value(client: Client) -> None:
+    """One series per route, not one per trace id: label cardinality stays bounded."""
+    async with client() as c:
+        await c.get("/v1/explain/abc")
+        await c.get("/v1/explain/def")
+        text = (await c.get("/metrics")).text
+    templated = (
+        'codesearch_http_requests_total{method="GET",path="/v1/explain/{trace_id}",status="404"}'
+    )
+    assert metric(text, templated) == 2
+    assert "/v1/explain/abc" not in text
+
+
+async def test_metrics_report_the_live_index(client: Client, built: Any) -> None:
+    _, snapshot = built
+    async with client() as c:
+        text = (await c.get("/metrics")).text
+    assert metric(text, "codesearch_index_chunks") == snapshot.manifest.chunk_count
+    assert f'index_version="{snapshot.manifest.index_version}"' in text
+
+
+async def test_metrics_work_before_the_index_is_loaded(client: Client) -> None:
+    async with client(handle=IndexHandle()) as c:
+        r = await c.get("/metrics")
+    assert r.status_code == 200
+    assert "codesearch_index_info{" not in r.text
+
+
+# =====================================================================
+# Drift gauge and GET /v1/admin/gaps
+# =====================================================================
+
+
+def monitored(built: Any, *, threshold: float = ALWAYS_ANSWER) -> Any:
+    settings, pipeline = make_pipeline(built, threshold=threshold)
+    settings = settings.with_overrides(
+        admin={"webhook_secret": SECRET}, monitoring={"drift_min_questions": 2}
+    )
+    return serve(create_app(settings, pipeline=pipeline))
+
+
+async def test_metrics_report_query_drift_once_there_are_enough_questions(built: Any) -> None:
+    async with monitored(built) as c:
+        before = (await c.get("/metrics")).text
+        await c.post("/v1/ask", json={"question": QUESTION})
+        await c.post("/v1/ask", json={"question": "When should I use useEffect?"})
+        after = (await c.get("/metrics")).text
+    assert math.isnan(metric(before, "codesearch_query_drift"))  # no data yet
+    drift = metric(after, "codesearch_query_drift")
+    assert 0.0 <= drift <= 2.0
+
+
+async def test_gaps_need_the_signature(built: Any) -> None:
+    async with monitored(built) as c:
+        r = await c.get("/v1/admin/gaps")
+    assert r.status_code == 401  # real user questions are not public
+
+
+async def test_gaps_cluster_the_abstained_questions(built: Any) -> None:
+    off_topic = ["How do I bake bread?", "How do I bake a cake?", "What is the capital of France?"]
+    async with monitored(built, threshold=ALWAYS_ABSTAIN) as c:
+        for q in off_topic:
+            await c.post("/v1/ask", json={"question": q})
+        r = await c.get("/v1/admin/gaps?k=2", headers=signed(b""))
+    assert r.status_code == 200
+    gaps = r.json()
+    assert sum(g["size"] for g in gaps) == 3
+    assert {q for g in gaps for q in g["examples"]} == set(off_topic)
+
+
+async def test_gaps_ignore_answered_questions(built: Any) -> None:
+    async with monitored(built) as c:
+        await c.post("/v1/ask", json={"question": QUESTION})
+        r = await c.get("/v1/admin/gaps", headers=signed(b""))
+    assert r.json() == []
+
+
+# =====================================================================
+# POST /v1/feedback
+# =====================================================================
+
+
+def with_feedback(built: Any, store: FeedbackStore) -> Any:
+    settings, pipeline = make_pipeline(built)
+    return serve(create_app(settings, pipeline=pipeline, feedback=store))
+
+
+async def test_feedback_on_an_answer_is_stored(built: Any) -> None:
+    store = FeedbackStore()
+    async with with_feedback(built, store) as c:
+        trace_id = (await c.post("/v1/ask", json={"question": QUESTION})).json()["trace_id"]
+        r = await c.post(
+            "/v1/feedback", json={"trace_id": trace_id, "vote": -1, "comment": "too vague"}
+        )
+    assert r.status_code == 204
+    assert r.content == b""
+    assert store.summary() == {"up": 0, "down": 1}
+    assert store.thumbs_down()[0].trace_id == trace_id
+    assert store.thumbs_down()[0].comment == "too vague"
+
+
+async def test_feedback_on_a_streamed_answer_is_stored(built: Any) -> None:
+    store = FeedbackStore()
+    async with with_feedback(built, store) as c:
+        r = await c.post("/v1/ask/stream", json={"question": QUESTION})
+        trace_id = r.headers["X-Trace-Id"]
+        r = await c.post("/v1/feedback", json={"trace_id": trace_id, "vote": 1})
+    assert r.status_code == 204
+    assert store.summary() == {"up": 1, "down": 0}
+
+
+async def test_feedback_on_an_unknown_answer_is_404(built: Any) -> None:
+    store = FeedbackStore()
+    async with with_feedback(built, store) as c:
+        r = await c.post("/v1/feedback", json={"trace_id": "never-asked", "vote": 1})
+    assert r.status_code == 404
+    assert len(store) == 0  # votes on made-up ids would skew the counts
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"trace_id": "x", "vote": 0},
+        {"trace_id": "x", "vote": 2},
+        {"trace_id": "x", "vote": "up"},
+        {"trace_id": "x"},
+        {"vote": 1},
+        {"trace_id": "x", "vote": 1, "comment": "a" * 501},
+        {"trace_id": "x", "vote": 1, "extra": True},
+    ],
+)
+async def test_a_malformed_vote_is_422(built: Any, body: dict[str, Any]) -> None:
+    async with with_feedback(built, FeedbackStore()) as c:
+        r = await c.post("/v1/feedback", json=body)
+    assert r.status_code == 422
+
+
+async def test_feedback_is_counted_in_the_metrics(built: Any) -> None:
+    async with with_feedback(built, FeedbackStore()) as c:
+        trace_id = (await c.post("/v1/ask", json={"question": QUESTION})).json()["trace_id"]
+        await c.post("/v1/feedback", json={"trace_id": trace_id, "vote": -1})
+        text = (await c.get("/metrics")).text
+    assert metric(text, 'codesearch_feedback_total{vote="down"}') == 1.0
+
+
+# =====================================================================
+# Startup: the models load before the first request
+# =====================================================================
+
+
+class WarmRecorder:
+    """Stands in for a real model: records when warm_up() ran."""
+
+    def __init__(self, log: list[str], name: str) -> None:
+        self.log = log
+        self.name = name
+
+    def warm_up(self) -> None:
+        self.log.append(f"warm {self.name}")
+
+
+async def test_models_are_warmed_before_the_first_request(built: Any) -> None:
+    settings, pipeline = make_pipeline(built)
+    events: list[str] = []
+    pipeline.grounder = WarmRecorder(events, "nli")  # groundedness is off in these tests
+    async with serve(create_app(settings, pipeline=pipeline)) as c:
+        events.append("first request")
+        r = await c.get("/readyz")
+    assert r.status_code == 200
+    assert events == ["warm nli", "first request"]  # loaded once, before traffic

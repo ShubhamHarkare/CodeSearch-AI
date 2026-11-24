@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from codesearch.errors import TraceNotFoundError
+from codesearch.errors import LLMRateLimitedError, LLMUnavailableError, TraceNotFoundError
 from codesearch.schemas import (
     Answer,
     Chunk,
@@ -25,8 +25,11 @@ from codesearch.schemas import (
     SentenceSupport,
 )
 from eval.answer_eval import (
+    ask_with_retry,
+    backoff,
     citation_precision,
     percentile,
+    result_name,
     run,
     run_answers,
     score_answer,
@@ -430,3 +433,124 @@ def test_run_writes_results_and_the_sentence_csv(tmp_path: Path) -> None:
     assert [t["label"] for t in table] == ["supported", "unsupported"]
     assert "best_score" in table[0]
     assert table[0]["human"] == ""
+
+
+# =====================================================================
+# Free-tier rate limits: retry with growing waits, pause between questions
+# =====================================================================
+
+
+class RateLimitedPipeline(ScriptedPipeline):
+    """Refuses the first ``fail`` calls with a 429, then answers from the script."""
+
+    def __init__(self, script: Any, fail: int, error: Exception | None = None) -> None:
+        super().__init__(script)
+        self.fail = fail
+        self.error = error or LLMRateLimitedError("rate limited, retry after 7s")
+
+    async def answer(
+        self, question: str, history: Any = None, *, bypass_cache: bool = False
+    ) -> Answer:
+        if self.fail > 0:
+            self.fail -= 1
+            self.calls.append((question, bypass_cache))
+            raise self.error
+        return await super().answer(question, history, bypass_cache=bypass_cache)
+
+
+class Clock:
+    """A fake asyncio.sleep: records the waits instead of waiting."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
+def test_backoff_doubles_up_to_a_minute() -> None:
+    assert [backoff(i) for i in range(7)] == [5, 10, 20, 40, 60, 60, 60]
+
+
+async def test_a_rate_limited_question_is_retried_until_it_answers() -> None:
+    script = {"question q1?": (answer(PAGE_A, trace_id="t1"), None)}
+    pipeline, clock = RateLimitedPipeline(script, fail=2), Clock()
+    got = await ask_with_retry(pipeline, "question q1?", sleep=clock)
+    assert got.trace_id == "t1"
+    assert len(pipeline.calls) == 3  # two refusals, then the answer
+    assert clock.waits == [5, 10]
+
+
+async def test_retrying_gives_up_after_the_last_attempt() -> None:
+    # Still refused after ~4 minutes: probably the daily quota. Stop, don't loop forever.
+    script = {"question q1?": (answer(PAGE_A), None)}
+    pipeline, clock = RateLimitedPipeline(script, fail=99), Clock()
+    with pytest.raises(LLMRateLimitedError):
+        await ask_with_retry(pipeline, "question q1?", retries=3, sleep=clock)
+    assert len(pipeline.calls) == 4  # the first try + 3 retries
+    assert clock.waits == [5, 10, 20]
+
+
+async def test_other_llm_errors_are_not_retried() -> None:
+    # A wrong model or key won't fix itself by waiting.
+    script = {"question q1?": (answer(PAGE_A), None)}
+    pipeline = RateLimitedPipeline(script, fail=1, error=LLMUnavailableError("HTTP 404"))
+    clock = Clock()
+    with pytest.raises(LLMUnavailableError):
+        await ask_with_retry(pipeline, "question q1?", sleep=clock)
+    assert clock.waits == []
+
+
+async def test_each_wait_is_reported() -> None:
+    script = {"question q1?": (answer(PAGE_A), None)}
+    seen: list[float] = []
+    await ask_with_retry(
+        RateLimitedPipeline(script, fail=1), "question q1?", sleep=Clock(), on_wait=seen.append
+    )
+    assert seen == [5]
+
+
+async def test_run_answers_survives_rate_limits() -> None:
+    pipeline, rows = scripted()
+    limited = RateLimitedPipeline(pipeline.script, fail=2)
+    records = await run_answers(limited, rows, sleep=Clock())
+    assert [r["id"] for r in records] == ["q1", "q2", "o1"]
+
+
+async def test_run_answers_pauses_between_questions_not_before_the_first() -> None:
+    pipeline, rows = scripted()
+    clock = Clock()
+    await run_answers(pipeline, rows, pause=4.0, sleep=clock)
+    assert clock.waits == [4.0, 4.0]  # 3 questions, 2 gaps
+
+
+async def test_no_pause_by_default() -> None:
+    pipeline, rows = scripted()
+    clock = Clock()
+    await run_answers(pipeline, rows, sleep=clock)
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("", "dense"),
+        ("gpt-oss-20b", "dense_gpt-oss-20b"),
+        ("openai/gpt-oss-20b", "dense_openai-gpt-oss-20b"),  # "/" would make a folder
+        ("  gemma3 4b ", "dense_gemma3-4b"),
+    ],
+)
+def test_result_name(tag: str, expected: str) -> None:
+    assert result_name("dense", tag) == expected
+
+
+def test_a_tagged_run_does_not_overwrite_the_untagged_one(tmp_path: Path) -> None:
+    pipeline, rows = scripted()
+    golden = tmp_path / "golden.jsonl"
+    golden.write_text("\n".join(r.model_dump_json() for r in rows) + "\n", encoding="utf-8")
+    config = tmp_path / "dense.yaml"
+    config.write_text("name: dense\noverrides:\n  retrieval:\n    mode: dense\n")
+    run(config, pipeline=pipeline, golden_path=golden, results_dir=tmp_path / "r")
+    run(config, pipeline=pipeline, golden_path=golden, results_dir=tmp_path / "r", tag="oss")
+    assert (tmp_path / "r" / "answers_dense.json").exists()
+    assert (tmp_path / "r" / "answers_dense_oss.json").exists()

@@ -20,7 +20,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from codesearch.ingest.manifest import ChangeLogEntry
-from codesearch.schemas import Answer, ChatMessage, Citation
+from codesearch.schemas import Answer, CacheTier, ChatMessage, Citation
 
 
 class AskRequest(BaseModel):
@@ -36,7 +36,7 @@ class AskResponse(BaseModel):
     abstained: bool
     confidence: float | None = None
     groundedness: float | None = None
-    cache_tier: Literal["exact", "semantic"] | None = None
+    cache_tier: CacheTier | None = None
     timings: dict[str, float]
     trace_id: str
     index_version: str
@@ -81,3 +81,10 @@ class DeepExplainResponse(BaseModel):
 
     trace_id: str
     scores: dict[str, float]  # chunk_id -> share of the answer (sums to 1, or all 0)
+
+
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    trace_id: str = Field(min_length=1, max_length=64)
+    vote: Literal[1, -1]  # FastAPI turns 0 / 2 / "up" into a 422 for you
+    comment: str | None = Field(default=None, max_length=500)

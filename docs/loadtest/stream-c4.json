@@ -1,0 +1,38 @@
+{
+  "mode": "stream",
+  "concurrency": 4,
+  "url": "http://localhost:8000",
+  "summary": {
+    "requests": 10,
+    "ok": 10,
+    "errors": 0,
+    "status_counts": {
+      "200": 10
+    },
+    "wall_s": 33.7,
+    "throughput_rps": 0.3,
+    "latency_ms": {
+      "p50": 13458.0,
+      "p90": 14105.9,
+      "p99": 14339.2,
+      "max": 14339.2,
+      "mean": 11611.4
+    },
+    "cache_tiers": {
+      "generated": 10
+    },
+    "ttft_ms": {
+      "p50": 10207.1,
+      "p90": 11162.2,
+      "max": 11338.8
+    }
+  },
+  "versions": {
+    "prompt_version": "3",
+    "index_version": "ac462615f149"
+  },
+  "git_sha": "ae179f1",
+  "machine": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+  "python": "3.13.5",
+  "at": "2026-11-20T20:54:02+00:00"
+}

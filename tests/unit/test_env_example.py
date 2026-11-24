@@ -56,4 +56,6 @@ def test_settings_from_env_example_keep_the_pinned_sha(
     s = Settings(_env_file=ENV_EXAMPLE)  # type: ignore[call-arg]
     assert s.index.react_dev_sha == IndexSettings().react_dev_sha
     assert s.cache.redis_url == "redis://localhost:6379/0"
-    assert s.llm.model == "gemma3:4b"
+    assert (s.llm.provider, s.llm.model) == ("openai", "openai/gpt-oss-20b")  # Groq
+    assert s.llm.reasoning_effort == "low"
+    assert s.llm.api_key.get_secret_value() == ""  # the key is never in the example

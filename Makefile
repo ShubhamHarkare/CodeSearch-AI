@@ -1,4 +1,4 @@
-.PHONY: setup lint test ingest eval ablation serve ui up
+.PHONY: setup lint test ingest eval ablation serve ui up down index logs
 
 setup:
 	uv sync --all-extras
@@ -29,11 +29,34 @@ ablation:
 	if [ -n "$$failed" ]; then echo "FAILED:$$failed (table uses their previous results)"; fi
 	uv run python -m eval.ablation_table --write README.md
 
+# Throughput and latency per serving path; needs `make serve` running in another terminal.
+# Writes docs/loadtest/{hit,miss,burst,mixed,stream}.json (committed, so README numbers can be re-run).
+loadtest:
+	uv run python -m eval.loadtest hit
+	uv run python -m eval.loadtest miss
+	uv run python -m eval.loadtest burst
+	uv run python -m eval.loadtest mixed
+	uv run python -m eval.loadtest stream
+
 serve:
 	uv run uvicorn codesearch.api.main:create_app --factory --reload
 
 ui:
 	uv run streamlit run codesearch/ui/streamlit_app.py
 
-up:
-	docker compose -f deploy/docker-compose.yml up --build
+# --- Docker: the whole stack (API, UI, Redis, Prometheus, Grafana) -------------
+# --env-file: compose reads ${VARS} from the repo's .env, not deploy/.env.
+COMPOSE = GIT_SHA=$$(git rev-parse --short HEAD) docker compose --env-file .env -f deploy/docker-compose.yml
+
+up:  ## build and start everything in the background
+	$(COMPOSE) up --build -d
+	@echo "UI http://localhost:8501   Grafana http://localhost:3000   API http://localhost:8000"
+
+down:  ## stop everything (volumes, so the index and traces, are kept)
+	$(COMPOSE) down
+
+index:  ## build or update the search index inside the stack (first run: a few minutes)
+	$(COMPOSE) run --rm api codesearch ingest
+
+logs:  ## follow the API's logs
+	$(COMPOSE) logs -f api

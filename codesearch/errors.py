@@ -94,3 +94,10 @@ class CacheUnavailableError(CodeSearchError):
 
 class ExplainUnavailableError(CodeSearchError):
     http_status: int = 409
+
+
+class LLMRateLimitedError(LLMUnavailableError):
+    """The hosted LLM refused the call because a quota was used up (HTTP 429)."""
+
+    http_status: int = 429
+    public_message: str = "The language model is busy. Please try again in a moment."

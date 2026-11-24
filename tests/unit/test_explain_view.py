@@ -18,9 +18,12 @@ from codesearch.ui.explain_view import (
     format_matched,
     format_ms,
     grounding_note,
+    message_from_answer,
     sentence_rows,
     source_rows,
+    sources_line,
     summary_lines,
+    timing_caption,
 )
 
 
@@ -178,6 +181,9 @@ def test_summary_explains_an_abstain() -> None:
 def test_summary_mentions_a_cache_hit() -> None:
     assert "Served from the exact cache." in summary_lines(trace(cache_tier="exact"))
     assert "Served from the semantic cache." in summary_lines(trace(cache_tier="semantic"))
+    shared = summary_lines(trace(cache_tier="shared"))
+    assert any("identical question" in line for line in shared)
+    assert not any("shared cache" in line for line in shared)
 
 
 def test_an_empty_trace_has_no_summary() -> None:
@@ -316,3 +322,52 @@ def test_attribution_rows_missing_score_counts_as_zero() -> None:
 def test_attribution_rows_only_cover_sources_sent_to_the_model() -> None:
     t = trace(candidates=[candidate("a"), candidate("b")], used_chunk_ids=["a"])
     assert [r["title"] for r in attribution_rows(t, {"a": 1.0, "b": 0.0})] == ["a"]
+
+
+# =====================================================================
+# chat message helpers (streaming UI)
+# =====================================================================
+
+ASK_RESPONSE = {
+    "answer": "Use an updater [1].",
+    "citations": [{"number": 1, "chunk_id": "c", "url": "https://react.dev/a", "title": "A"}],
+    "abstained": False,
+    "cache_tier": None,
+    "timings": {"total_ms": 6900.0},
+    "trace_id": "t",
+    "groundedness": 0.8,
+    "confidence": 0.7,
+}
+
+
+def test_message_from_ask_and_from_stream_done_are_the_same() -> None:
+    done = {k: v for k, v in ASK_RESPONSE.items() if k != "answer"} | {
+        "text": "Use an updater [1]."
+    }
+    assert message_from_answer(done) == message_from_answer(ASK_RESPONSE)
+    msg = message_from_answer(ASK_RESPONSE)
+    assert msg["role"] == "assistant"
+    assert msg["content"] == "Use an updater [1]."
+    assert (msg["total_ms"], msg["ttft_ms"], msg["trace_id"]) == (6900.0, None, "t")
+
+
+def test_message_from_answer_keeps_ttft_when_streamed() -> None:
+    done = {"text": "x", "timings": {"total_ms": 6900.0, "ttft_ms": 850.0}, "trace_id": "t"}
+    assert message_from_answer(done)["ttft_ms"] == 850.0
+
+
+def test_sources_line_numbers_and_links_each_source() -> None:
+    sources = [
+        {"number": 1, "url": "https://react.dev/a", "title": "A"},
+        {"number": 2, "url": "https://react.dev/b", "title": "B"},
+    ]
+    assert sources_line(sources) == "[1] [A](https://react.dev/a) · [2] [B](https://react.dev/b)"
+    assert sources_line([]) == ""
+
+
+@pytest.mark.parametrize(
+    ("total", "ttft", "text"),
+    [(6900.0, 850.0, "first words 0.8s · 6.9s"), (6900.0, None, "6.9s"), (None, None, "")],
+)
+def test_timing_caption(total: float | None, ttft: float | None, text: str) -> None:
+    assert timing_caption(total, ttft) == text

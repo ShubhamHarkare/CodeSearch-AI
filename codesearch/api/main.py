@@ -20,43 +20,92 @@ create_app(fake settings).
 Phase: 1
 """
 
+import asyncio
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from codesearch.api import routes_admin, routes_ask
+from codesearch.api.background import ReindexRunner, make_build, periodic
 from codesearch.config import Settings
 from codesearch.errors import CodeSearchError
 from codesearch.factory import build_pipeline
+from codesearch.interfaces import Embedder
 from codesearch.log import bind_trace_id, configure_logging, get_logger, new_trace_id
+from codesearch.monitoring.drift import DriftTracker, reference_questions
+from codesearch.monitoring.feedback import FeedbackStore
+from codesearch.monitoring.prometheus import Monitor
 from codesearch.pipeline import AnswerPipeline
+from codesearch.warmup import warm_up
 
 TRACE_HEADER = "X-Trace-Id"
 _SAFE_TRACE_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 log = get_logger(__name__)
 
 
+def build_drift(settings: Settings, embedder: Embedder | None) -> DriftTracker | None:
+    """The query-drift tracker, or None when drift can't be measured (the gauge then shows NaN)."""
+    if embedder is None:
+        log.warning("no embedder; query drift disabled")
+        return None
+    questions = reference_questions(settings.monitoring.reference_questions)
+    if not questions:
+        log.warning("no reference questions; query drift disabled")
+        return None
+    return DriftTracker(embedder, questions, settings.monitoring.drift_min_questions)
+
+
+def feedback_path(settings: Settings) -> Path:
+    """Votes live next to the traces, so one volume holds all the app's SQLite files."""
+    return settings.explain.trace_db.parent / "feedback.db"
+
+
 def create_app(
-    settings: Settings | None = None, *, pipeline: AnswerPipeline | None = None
+    settings: Settings | None = None,
+    *,
+    pipeline: AnswerPipeline | None = None,
+    reindexer: ReindexRunner | None = None,
+    feedback: FeedbackStore | None = None,
 ) -> FastAPI:
     settings = settings if settings is not None else Settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Startup: runs once, before the first request.
         configure_logging()
         app.state.settings = settings
         app.state.pipeline = pipeline if pipeline is not None else build_pipeline(settings)
+        # Load the models now, off the event loop, before any request is accepted.
+        seconds = await asyncio.to_thread(warm_up, app.state.pipeline)
+        log.info("models.ready", **seconds)
+        # Re-indexing swaps new builds into the same handle the pipeline reads from.
+        runner = reindexer or ReindexRunner(make_build(settings, app.state.pipeline.handle))
+        app.state.reindexer = runner
+        app.state.monitor = Monitor(
+            settings.monitoring.window_size,
+            settings.retrieval.mode,
+            drift=build_drift(settings, app.state.pipeline.embedder),
+        )
+        # Close the store on shutdown only if we opened it (a test may pass its own).
+        own_feedback = feedback is None
+        app.state.feedback = FeedbackStore(feedback_path(settings)) if own_feedback else feedback
+        timer = None
+        hours = settings.admin.reindex_interval_hours
+        if settings.admin.follow_upstream and hours > 0:
+            timer = asyncio.create_task(periodic(runner, hours * 3600))
         log.info("Application startup complete")
-        # STARTUP (runs once, before the first request):
-        #   configure_logging()
-        #   app.state.settings = settings
-        #   app.state.pipeline = pipeline if given, else build_pipeline(settings)
-        yield
-        # SHUTDOWN (runs once when the server stops): just log for now
+        yield  # the app serves requests here
+        # Shutdown: stop the timer and any rebuild loop before the process exits.
+        if timer is not None:
+            timer.cancel()
+        await runner.stop()
+        if own_feedback:
+            app.state.feedback.close()
         log.info("Application shutdown complete")
 
     app = FastAPI(title="CodeSearch AI", version="2.0", lifespan=lifespan)
@@ -86,6 +135,13 @@ def create_app(
             status=response.status_code,
             latency_ms=round((time.perf_counter() - start) * 1000, 1),
         )
+        monitor = getattr(request.app.state, "monitor", None)
+        if monitor is not None:
+            route = request.scope.get("route")
+            path = getattr(route, "path", "unmatched")
+            monitor.metrics.observe_http(
+                request.method, path, response.status_code, time.perf_counter() - start
+            )
         # 6. return response
         return response
 

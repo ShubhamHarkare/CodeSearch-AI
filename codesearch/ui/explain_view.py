@@ -100,7 +100,9 @@ def summary_lines(trace: dict[str, Any]) -> list[str]:
     if standalone and standalone != question:
         lines.append(f"Searched as: {standalone}")
 
-    if cache_tier := trace.get("cache_tier"):
+    if (cache_tier := trace.get("cache_tier")) == "shared":
+        lines.append("Shared with an identical question that was being answered at the same time.")
+    elif cache_tier:
         lines.append(f"Served from the {cache_tier} cache.")
 
     if abstain_reason := trace.get("abstain_reason"):
@@ -186,3 +188,40 @@ def attribution_rows(trace: dict[str, Any], scores: dict[str, float]) -> list[di
             }
         )
     return rows
+
+
+def message_from_answer(result: dict[str, Any]) -> dict[str, Any]:
+    """An assistant chat message from either API shape.
+
+    POST /v1/ask returns the answer under "answer"; the stream's ``done`` event
+    carries the pipeline's Answer, whose text is under "text". Everything else
+    has the same keys.
+    """
+    timings = result.get("timings") or {}
+    return {
+        "role": "assistant",
+        "content": result["answer"] if "answer" in result else result["text"],
+        "citations": result.get("citations", []),
+        "abstained": result.get("abstained", False),
+        "cache_tier": result.get("cache_tier"),
+        "total_ms": timings.get("total_ms"),
+        "ttft_ms": timings.get("ttft_ms"),
+        "trace_id": result.get("trace_id"),
+        "groundedness": result.get("groundedness"),
+        "confidence": result.get("confidence"),
+    }
+
+
+def sources_line(sources: list[dict[str, Any]]) -> str:
+    """'[1] [Title](url) · [2] ...' for a list of citation or source dicts."""
+    return " · ".join(f"[{s['number']}] [{s['title']}]({s['url']})" for s in sources)
+
+
+def timing_caption(total_ms: float | None, ttft_ms: float | None) -> str:
+    """'first words 0.9s · 6.9s' when streamed; '6.9s' otherwise; '' if unknown."""
+    if total_ms is None:
+        return ""
+    total = f"{total_ms / 1000:.1f}s"
+    if ttft_ms is None:
+        return total
+    return f"first words {ttft_ms / 1000:.1f}s · {total}"

@@ -1,23 +1,31 @@
-# =============================================================================
-# TODO(v2): moves to the repo root next to deploy/Dockerfile's build context.
-# '*.md' also excludes prompts and docs the image may need; list what to
-# exclude explicitly (data/, index/, mlruns/, tests/, .venv/, .git/).
-# =============================================================================
+# Everything the image doesn't need. Smaller build context = faster builds, and
+# secrets can't end up in an image layer by accident.
 
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-env/
-venv/
-.venv
-.git
-.gitignore
-*.md
+# secrets and local settings
+.env
+.env.*
+!.env.example
+
+# big local data: the index and corpus are volumes, built inside the stack
+data/
+index/
+traces/
+results/
+mlruns/
+mlflow.db
 logs/
-test_*.py
-output*.txt
-*.json
+
+# not needed at runtime
+.git/
+.github/
+.venv/
+tests/
+docs/
+legacy/
+deploy/grafana/
+**/__pycache__/
+**/*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 .DS_Store
-.env.local

@@ -1,26 +1,14 @@
-"""The chat interface. Replaces v1's app.py.
+"""The chat interface: Streamlit, talking to the API only through ApiClient.
 
-What goes here:
-    - One ``handle_question(question)`` used by both the chat input and the
-      example buttons (v1 duplicated this code).
-    - Streaming: render the sources as soon as the ``retrieval`` event arrives,
-      then ``st.write_stream`` the tokens, then citation links and sentence
-      tags when ``citations`` / ``groundedness`` arrive.
-    - "Why this answer?" expander per message: score table (BM25 / dense /
-      RRF / rerank per source), matched query terms, sentence labels,
-      confidence badge, and a "Deep explain" button.
-    - Thumbs up / down per answer -> api_client.send_feedback.
-    - Sidebar: readiness (cached 30 s), index version and corpus SHA, cache hit
-      rate, p50/p95 latency, rolling groundedness.
-
-Must not:
-    - import the pipeline, models or Redis. Everything goes through ApiClient.
-    - use auto-generated CSS class names (they break between Streamlit versions).
-
-Phase: 1 (basic chat), 2 (explain panel), 3 (streaming, feedback)
+A question streams from POST /v1/ask/stream: the sources show as soon as retrieval
+finishes, then the answer types itself out. When the ``done`` event arrives the page
+re-renders the finished message: cleaned citations, confidence badge, grounding
+note, timings (first words and total) and the "Why this answer?" panel with an
+on-demand "Deep explain". Pure formatting lives in explain_view.py (unit tested).
 """
 
 import os
+from collections.abc import Iterator
 from typing import Any, Literal
 
 import streamlit as st
@@ -30,9 +18,12 @@ from codesearch.ui.explain_view import (
     attribution_rows,
     confidence_badge,
     grounding_note,
+    message_from_answer,
     sentence_rows,
     source_rows,
+    sources_line,
     summary_lines,
+    timing_caption,
 )
 
 API_URL = os.environ.get("CODESEARCH_API_URL", "http://localhost:8000")
@@ -80,35 +71,36 @@ def fetch_trace(trace_id: str) -> dict[str, Any] | None:
 
 
 def handle_question(question: str) -> None:
-    """Shared by the chat input and the example buttons."""
+    """Shared by the chat input and the example buttons. Streams the answer live."""
     question = question.strip()
     if not question:
         return
     messages: list[dict[str, Any]] = st.session_state.messages
     history = [{"role": m["role"], "content": m["content"]} for m in messages if not m.get("error")]
     messages.append({"role": "user", "content": question})
+    render_message(messages[-1])  # show it now; the whole page re-renders after the answer
 
-    try:
-        with st.spinner("Searching the React docs…"):
-            result = get_client().ask(question, history=history[-HISTORY_TURNS:])
-    except ApiError as e:
-        # Stored as a message: a bare st.error would vanish on the st.rerun() below.
-        messages.append({"role": "assistant", "content": str(e), "error": True})
-        return
+    done: dict[str, Any] = {}
+    with st.chat_message("assistant", avatar=AVATARS["assistant"]):
+        status = st.empty()
+        status.caption("Searching the React docs…")
 
-    messages.append(
-        {
-            "role": "assistant",
-            "content": result["answer"],
-            "citations": result.get("citations", []),
-            "abstained": result.get("abstained", False),
-            "cache_tier": result.get("cache_tier"),
-            "total_ms": result.get("timings", {}).get("total_ms"),
-            "trace_id": result.get("trace_id"),
-            "groundedness": result.get("groundedness"),
-            "confidence": result.get("confidence"),
-        }
-    )
+        def tokens() -> Iterator[str]:
+            for event in get_client().ask_stream(question, history=history[-HISTORY_TURNS:]):
+                if event.type == "retrieval":
+                    status.caption(f"Reading {sources_line(event.data)}")
+                elif event.type == "token":
+                    yield event.data
+                elif event.type == "done":
+                    done.update(event.data)
+
+        try:
+            st.write_stream(tokens())
+        except ApiError as e:
+            # Stored as a message: a bare st.error would vanish on the st.rerun() after this.
+            messages.append({"role": "assistant", "content": str(e), "error": True})
+            return
+    messages.append(message_from_answer(done))
 
 
 def render_message(msg: dict[str, Any]) -> None:
@@ -121,9 +113,7 @@ def render_message(msg: dict[str, Any]) -> None:
             return
 
         # The API's number matches the [n] markers in the answer text.
-        sources = " · ".join(
-            f"[{c['number']}] [{c['title']}]({c['url']})" for c in msg.get("citations", [])
-        )
+        sources = sources_line(msg.get("citations", []))
         if sources:
             st.caption(f"Sources: {sources}")
 
@@ -139,12 +129,14 @@ def render_message(msg: dict[str, Any]) -> None:
         meta = []
         if msg.get("abstained"):
             meta.append("Not covered in the React docs")
-        if msg.get("cache_tier"):
+        if msg.get("cache_tier") == "shared":
+            meta.append("shared with an identical question")
+        elif msg.get("cache_tier"):
             meta.append(f"cached ({msg['cache_tier']})")
         if msg.get("groundedness") is not None:
             meta.append(f"grounded {msg['groundedness']:.0%}")
-        if msg.get("total_ms") is not None:
-            meta.append(f"{msg['total_ms'] / 1000:.1f}s")
+        if timing := timing_caption(msg.get("total_ms"), msg.get("ttft_ms")):
+            meta.append(timing)
         if meta:
             st.caption(" · ".join(meta))
 
@@ -155,6 +147,41 @@ def render_message(msg: dict[str, Any]) -> None:
             if note:
                 st.caption(f":orange[:material/warning: {note}. See *Why this answer?*]")
             render_explanation(msg["trace_id"])
+            render_feedback(msg["trace_id"])
+
+
+def render_feedback(trace_id: str) -> None:
+    """Thumbs up / down under an answer; a thumbs down can carry an optional comment.
+
+    Streamlit reruns the script on every click, so remember what was already sent
+    and only POST when the vote or the comment changed.
+    """
+    choice = st.feedback("thumbs", key=f"fb_{trace_id}")  # None, 0 = down, 1 = up
+    if choice is None:
+        return
+    vote = 1 if choice == 1 else -1
+    comment = None
+    if vote == -1:
+        comment = (
+            st.text_input(
+                "What was wrong? (optional)",
+                key=f"fbc_{trace_id}",
+                max_chars=500,
+                placeholder="e.g. outdated API, wrong hook, missing example",
+            ).strip()
+            or None
+        )
+    sent: dict[str, tuple[int, str | None]] = st.session_state.setdefault("feedback_sent", {})
+    if sent.get(trace_id) == (vote, comment):
+        st.caption("Thanks for the feedback.")
+        return
+    try:
+        get_client().send_feedback(trace_id, vote, comment)
+    except ApiError as e:
+        st.caption(f":orange[:material/warning: Feedback not saved: {e}]")
+        return
+    sent[trace_id] = (vote, comment)
+    st.caption("Thanks for the feedback.")
 
 
 def render_explanation(trace_id: str) -> None:

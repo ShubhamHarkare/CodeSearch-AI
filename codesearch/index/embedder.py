@@ -108,3 +108,7 @@ class SentenceTransformerEmbedder:
         """Embed one search query (with the model's query instruction), shape (dim,)."""
         vector: NDArray[np.float32] = self.embed([self.query_instruction + text])[0]
         return vector
+
+    def warm_up(self) -> None:  # ← NEW
+        """Load the weights and run one query, so the first user doesn't wait for it."""
+        self.embed_query("warm up")
