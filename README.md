@@ -3,8 +3,9 @@
 Question answering over the [React documentation](https://react.dev) that shows its work.
 Every answer comes with sources you can check, a sentence-by-sentence support check, a
 calibrated confidence score and a trace of how it was produced; questions the docs don't
-cover get an honest "I don't know". Runs fully locally: a 4B model through
-[Ollama](https://ollama.com), no API keys.
+cover get an honest "I don't know". Runs as one Docker stack (API, UI, Redis, Prometheus,
+Grafana) with `make up`. The LLM is any OpenAI-compatible API (Groq `gpt-oss-20b` by
+default) or a local model through [Ollama](https://ollama.com).
 
 Ask *"How do I update state based on the previous state?"* and you get a short answer whose
 `[n]` markers link to the doc sections it came from. Ask *"What's the capital of France?"*
@@ -26,10 +27,19 @@ and it declines without calling the model.
   plus a semantic tier for paraphrases that must also retrieve the same top chunk. Keys
   include the index, prompt and model versions, so a rebuild never serves stale answers.
 - **Streams answers.** `POST /v1/ask/stream` sends the sources first, then the answer
-  token by token (server-sent events); first words arrive in ~1.8 s instead of ~4.2 s for
-  the whole answer. Closing the tab stops the model mid-answer and caches nothing.
+  token by token (server-sent events): first words in 0.33 s on Groq (1.8 s on a local
+  4B model). Closing the tab stops the model mid-answer and caches nothing.
 - **Shares identical in-flight questions.** Ten users asking the same new question at
   once trigger one LLM call; the other nine wait for it (single-flight per cache key).
+- **Stays current.** A signed webhook (or a timer) rebuilds only the chunks that changed
+  into a new build folder, then switches the live index atomically: a request never sees
+  half an old index and half a new one.
+- **Watches itself.** Prometheus metrics (latency, first-token time, cache hit rate,
+  abstain rate, groundedness, query drift against the golden set, thumbs up/down) on a
+  provisioned Grafana dashboard, with alerts for falling groundedness, drift and LLM rate
+  limits. Questions it couldn't answer are clustered into topics (`GET /v1/admin/gaps`).
+- **Fails politely.** When the hosted LLM's quota runs out, users get "busy, try again"
+  (HTTP 429), the eval waits and retries, and cached answers keep being served.
 - **Explains every answer** (next section).
 - **Gates merges on quality.** CI re-runs retrieval on the golden set and blocks a PR to
   `main` if a metric drops past its tolerance.
@@ -59,7 +69,7 @@ flowchart TD
     A -.->|yes: I don't know, no LLM call| OUT
     A -->|no| S{Semantic cache}
     S -.->|hit| OUT
-    S -->|miss| L[Prompt v3 → Ollama gemma3:4b]
+    S -->|miss| L[Prompt v3 → LLM: Groq gpt-oss-20b / Ollama]
     L --> CI[Validate citations]
     CI --> G[Groundedness: NLI per sentence]
     G --> CF[Confidence: calibrated]
@@ -146,6 +156,32 @@ scored near-verbatim quotes of the docs as unsupported, which also hid real mis-
 The judge is itself a model; comparing it with an LLM judge and hand labels is on the
 roadmap.
 
+### Which model: a local 4B vs a hosted 20B
+
+The same pipeline, prompt and judge with two models (all 79 questions):
+
+| | gemma3:4b (Ollama, laptop) | gpt-oss-20b (Groq) |
+|---|---:|---:|
+| In-scope questions answered | 87% | 84% |
+| Out-of-scope questions declined | 92% | 100% |
+| Citation precision | 0.66 | 0.70 |
+| Answers citing a right page | 81% | 74% |
+| **Sentences carrying their own `[n]`** | **87%** | **45%** |
+| Groundedness | **0.57** | **0.09** |
+| Latency p50 / p95 | 5.8 s / 12.8 s | **1.1 s / 1.8 s** |
+
+The bigger model cites the right pages about as well, but **ignores the per-sentence
+citation rule**: it often puts one `[2]` after the whole answer, so most sentences have no
+source to check and grade as unsupported. With more reasoning (`reasoning_effort=medium`,
+15 questions) 45% of its sentences are supported by *some* retrieved source, yet 35% cite
+the wrong one: the content is mostly fine, the attribution isn't. A prompt with a worked
+example of per-sentence citations is the next experiment. The deployed default is still
+gpt-oss-20b, for its speed and a free quota that isn't shared with other users (free
+hosted Gemma endpoints were rate-limited by their shared pool).
+
+The point for the eval: a 5× bigger model looked fine when reading answers, and only the
+per-sentence check showed that its citations could not be trusted.
+
 ### Confidence
 
 A logistic regression over three features (top retrieval score, mean of the top 3,
@@ -158,36 +194,74 @@ On the 48 answered questions, low-confidence answers were never good and high-co
 answers were good 79% of the time. ECE is 0.13; with ~50 answers a single answer moves a
 bin by up to 50%, so read the bins together with their `n`.
 
+The shipped calibrator is this gemma3:4b fit. Refitting on gpt-oss-20b gave 2 good
+answers out of 46, too few to learn from, so with gpt-oss the badge mostly reads low or
+medium until its citations improve.
+
 ### Serving performance
 
-Measured on a MacBook Air (gemma3:4b in Ollama, Redis in Docker) with
-`eval/loadtest.py`; every figure is re-runnable with `make loadtest`, and the raw reports
-are in [`docs/loadtest/`](docs/loadtest/).
+`eval/loadtest.py` against the API, in two setups. Every figure is re-runnable, and the
+raw reports are in [`docs/loadtest/`](docs/loadtest/) (local) and
+[`docs/loadtest/docker-groq/`](docs/loadtest/docker-groq/) (Docker).
 
-| Scenario | Result | Report |
+| Scenario | Local: Ollama gemma3:4b, `make serve` | Docker stack: Groq gpt-oss-20b |
 |---|---|---|
-| Cache hits, 50 concurrent | 291 req/s, p50 94 ms, p99 960 ms | `hit.json` |
-| Cache hits while 4 answers generate | p50 9 ms, p99 26 ms | `mixed.json` |
-| New questions, 1 user, streamed | first words p50 1.8 s, full answer p50 4.2 s | `stream.json` |
-| New questions, 4 users, streamed | first words p50 10.2 s, full answer p50 13.5 s | `stream-c4.json` |
-| 10 identical new questions at once | 1 LLM call (was 10), 6.9 s wall time (was 32 s) | `burst.json` |
+| Cache hits, 50 concurrent | 291 req/s, p50 94 ms, p99 960 ms | 187 req/s, p50 141 ms, p99 1.6 s |
+| Cache hits while 4 answers generate | p50 9 ms, p99 26 ms | p50 9 ms, **p99 1.28 s** |
+| New question, 1 user, streamed | first words p50 1.8 s, total 4.2 s | first words **p50 0.33 s**, total 0.6 s |
+| New questions, 4 users, streamed | first words p50 10.2 s | first words p50 0.72 s; **7 of 10 rate-limited** |
+| 20 new questions, 4 at a time | all answered, queued | **15 of 20 refused (HTTP 429)** |
+| 10 identical new questions at once | 1 LLM call (was 10), 6.9 s (was 32 s) | 1 LLM call, 0.61 s |
 
-The model is the bottleneck: a laptop's Ollama generates one answer at a time, so
-concurrent new questions queue (throughput stays ~0.2–0.3 answers/s). Streaming improves
-what one user waits for; more users need more model capacity, not more code. Cache hits
-never queue behind it: they stay at ~9 ms while answers are being generated.
+What changed between the two columns:
+
+- **The bottleneck moved from compute to quota.** Locally, one laptop model generates one
+  answer at a time, so new questions queue but all get answered. Groq answers 5× faster,
+  but its free tier caps tokens per minute, and every one of the 28 failures in the Docker
+  runs was a rate limit (the API logs one line per refusal), not an error. Users got
+  "busy, try again"; cached answers kept flowing at 187 req/s; single-flight turned the
+  10-question burst into one call. More users would need a paid tier or a second
+  provider, not more code.
+- **A stall the slow model was hiding.** Cache hits need no model, yet while new answers
+  were being checked they slowed to p99 1.28 s (26 ms locally). Retrieval, reranking and
+  the NLI check are synchronous calls inside async handlers, so they block the event loop.
+  With a slow LLM most of a request was spent awaiting the model, which hid the problem;
+  with Groq answering in 0.3 s the CPU-bound NLI check dominates. The fix (run them in
+  `asyncio.to_thread`) is the first item on the roadmap.
+- **Docker Desktop on macOS adds latency** to every request (port forwarding through its
+  VM), which accounts for most of the drop in cache-hit throughput; on a Linux host it
+  mostly goes away.
 
 ## Quick start
 
-Needs Python 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com) and,
-optionally, Docker for Redis.
+### Docker (the whole stack)
+
+Needs Docker and an LLM key (a free [Groq](https://console.groq.com) key works).
+
+```bash
+cp .env.example .env          # set CODESEARCH_LLM__API_KEY and GRAFANA_ADMIN_PASSWORD
+make index                    # first run: builds the image, fetches react.dev, builds the index
+make up                       # API, UI, Redis, Prometheus, Grafana
+
+# chat UI   http://localhost:8501
+# Grafana   http://localhost:3000   (admin / your GRAFANA_ADMIN_PASSWORD)
+# API       http://localhost:8000   (OpenAPI docs at /docs)
+make logs                     # follow the API; `make down` stops everything
+```
+
+The image is multi-stage, runs as a non-root user and has the embedding and NLI models
+baked in, so containers start without downloading anything; the models are loaded before
+the API accepts its first request. The index, traces and feedback live in volumes.
+
+### Local development
+
+Needs Python 3.13 and [uv](https://docs.astral.sh/uv/); for a fully local LLM,
+[Ollama](https://ollama.com) (`CODESEARCH_LLM__PROVIDER=ollama`, model `gemma3:4b`).
 
 ```bash
 make setup                    # uv sync --all-extras + pre-commit
 cp .env.example .env          # every variable is documented there
-ollama pull gemma3:4b         # any local model works; set CODESEARCH_LLM__MODEL
 make ingest                   # fetch react.dev at a pinned commit, build the index
-docker compose up -d redis    # optional: without it the cache falls back to memory
 
 make serve                    # API on http://localhost:8000 (OpenAPI docs at /docs)
 make ui                       # chat UI on http://localhost:8501
@@ -207,12 +281,14 @@ curl -N -X POST localhost:8000/v1/ask/stream -H 'Content-Type: application/json'
 make eval                     # the default config (dense) → results/dense.json
 make ablation                 # every config in eval/configs/, then refreshes the table above
 
-# answer quality (needs Ollama; ~10 min for all 79 questions)
+# answer quality (~10-30 min for all 79 questions)
 uv run python -m eval.answer_eval eval/configs/dense.yaml [--limit 10]
+#   --tag gpt-oss-20b   keep each model's results side by side
+#   --pause 10          space out questions for a free-tier quota (429s are retried)
 uv run python -m eval.fit_calibrator results/answers_dense.json   # -> models/calibrator.json
 uv run python -m eval.plot_reliability                           # -> docs/reliability.png
 
-# serving performance (needs `make serve` running)
+# serving performance (needs the API running: `make serve` or `make up`)
 make loadtest                 # hit, miss, burst, mixed, stream -> docs/loadtest/*.json
 ```
 
@@ -232,14 +308,17 @@ make loadtest                 # hit, miss, burst, mixed, stream -> docs/loadtest
 codesearch/
   ingest/       fetch react.dev, chunk by headings, build Chroma + BM25 + manifest
   retrieval/    dense / BM25 / hybrid (RRF), rerankers, abstain, condense
-  generation/   versioned prompts, Ollama client, citation validation
-  cache/        keys, LRU, Redis exact cache, semantic cache, tiered cache
+  generation/   versioned prompts, LLM clients (OpenAI-compatible, Ollama), citations
+  cache/        keys, LRU, Redis exact cache, semantic cache, tiered cache, single-flight
   explain/      traces, groundedness (NLI), calibration, leave-one-out attribution
-  api/          FastAPI app: /v1/ask, /v1/explain, /healthz, /readyz, /v1/index
+  monitoring/   rolling windows, Prometheus metrics, query drift, content gaps, feedback
+  api/          FastAPI app, SSE streaming, background re-indexing, signed webhook
   ui/           Streamlit app + the HTTP client it uses
   pipeline.py   the query path, step by step
-eval/           golden set, metrics, runners, regression gate, ablation table
+  warmup.py     loads the models at startup
+eval/           golden set, metrics, runners, regression gate, ablation, load test
 prompts/        answer.yaml, condense.yaml (versioned, fingerprinted in tests)
+deploy/         Dockerfile, docker-compose.yml, Prometheus config + alerts, Grafana
 tests/          unit + integration tests (pytest; no model or network needed)
 ```
 
@@ -252,36 +331,35 @@ make lint                     # ruff + ruff format + mypy --strict
 
 - **Small, single-author golden set** (55 + 24 questions). Enough to catch regressions in
   CI, not to claim general accuracy.
-- **A 4B local model.** Chosen for cost and privacy; answers are slower (~6 s) and weaker
-  than a hosted model would give. The model is one config value.
-- **One answer at a time.** The local model serializes generation, so with 4 concurrent
-  new questions the first words take ~10 s. Streaming doesn't change that; capacity does.
-- **Some synchronous work on the event loop.** Embedding, Chroma, reranking and the NLI
-  check are blocking calls; measured, they stall other requests by up to ~0.6 s per
-  answer (cache hits stay at p50 9 ms during generation), and the Redis client is
-  synchronous, which queues cache hits at high concurrency (p99 960 ms at 50).
-- **Single-flight is per process**, like the semantic cache: with several workers, each
-  shares only its own in-flight questions. Streamed requests don't share at all.
-- **The semantic cache is per process**: in memory, lost on restart, not shared between
-  workers, and its 0.95 threshold has not been evaluated for false hits.
+- **Blocking work on the event loop.** Embedding, Chroma, reranking and the NLI check are
+  synchronous calls inside async handlers: with Groq, cache hits stall to p99 1.28 s
+  while new answers are being checked. Fix: run them in `asyncio.to_thread`. The Redis
+  client is synchronous too, which queues cache hits at high concurrency.
+- **The free LLM quota is the capacity limit.** About five new answers per burst before
+  Groq refuses with 429s; handled gracefully, but not a production capacity.
+- **gpt-oss-20b's citations.** It cites far fewer sentences than the prompt asks for, so
+  groundedness is low with the deployed model (see the model comparison).
+- **One process holds the state.** Single-flight, the semantic cache, the metrics window
+  and drift are per process, and traces and feedback are SQLite files: the stack runs one
+  API worker. Scaling out needs these moved to shared stores (Redis, a database).
+- **Not deployed publicly.** The stack runs anywhere Docker does; there is no hosted
+  instance, and the UI has no authentication or per-user rate limit yet.
 
 ## Status and roadmap
 
-Phases 1 (retrieval, eval, API, UI) and 2 (explainability) are complete. Phase 3 is in
-progress: streaming (API and UI), single-flight and the load test are done. These are
-scaffolding and **not implemented yet**: `codesearch/monitoring/`,
-`codesearch/api/background.py`, `deploy/`, `make up`, and the `nightly-eval` and
-`release` workflows.
+Phases 1 (retrieval, eval, API, UI), 2 (explainability) and 3 (streaming, single-flight,
+re-indexing, monitoring, feedback, Docker stack) are complete.
 
 Next:
 
+- **Serving:** blocking calls in threads (the measured stall above), an async Redis
+  client, and shared state (single-flight lock and semantic cache in Redis, traces in a
+  database) so the API can run as several instances behind a load balancer.
+- **Answers:** a prompt that gets gpt-oss to cite per sentence, then refit the calibrator.
 - **Evaluation:** bootstrap confidence intervals, a held-out split for the abstain
-  threshold with one threshold per score kind, and a larger golden set.
-- **Serving:** load models at startup (the first request after a restart pays ~7 s), an
-  async Redis client, blocking calls in threads, and the semantic cache in Redis.
-- **Freshness:** incremental re-indexing when the docs change, triggered by a webhook.
-- **Deployment:** a multi-stage Docker image, a compose stack, Prometheus metrics and
-  drift monitoring.
+  threshold, a larger golden set, and an LLM judge compared against the NLI judge.
+- **Deployment:** a public instance with authentication and per-user rate limits; CI that
+  builds and publishes the image.
 
 ## Author
 
